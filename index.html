@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#203a5f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Team Tool">
+<title>Team Tool</title>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="loading-card">
+    <div class="spinner"></div>
+    <h2 id="loadingTitle">Connexion à la base commune…</h2>
+    <div id="loadingText" class="muted">Initialisation sécurisée de cet appareil.</div>
+  </div>
+</div>
+
+<div id="accessScreen" style="display:none">
+  <main>
+    <div class="card access-card">
+      <h1>Accès à Team Tool</h1>
+      <p class="muted">Cet appareil n’est pas encore associé à un covoitureur.</p>
+      <div class="notice"><strong>À faire une seule fois sur cet appareil</strong><br>Ouvre le lien personnel reçu sur WhatsApp. Ensuite cet appareil restera reconnu automatiquement.</div>
+      <p class="small muted">Tu peux utiliser le même lien personnel sur ton téléphone et sur ton PC.</p>
+      <div id="accessError" class="notice danger" style="display:none"></div>
+    </div>
+  </main>
+</div>
+
+<div id="appShell" style="display:none">
+<header>
+  <div class="header-row">
+    <div><div class="brand">🚗 Covoiturage</div><div class="tag"><span id="syncDot" class="sync-dot"></span><span id="syncText">Base commune</span></div></div>
+    <div class="row">
+      <button id="installBtn" class="btn secondary smallbtn" style="display:none">Installer</button>
+      <div class="identity"><span class="dot"></span><span id="identityName">—</span></div>
+    </div>
+  </div>
+  <nav id="nav">
+    <button data-page="tomorrow" class="active">Demain</button>
+    <button data-page="planning">Planning</button>
+    <button data-page="groups">Groupes</button>
+    <button data-page="summary">Mon bilan</button>
+    <button data-page="history">Historique</button>
+    <button data-page="admin" id="adminNav" class="hidden">Admin</button>
+  </nav>
+</header>
+<main>
+<section id="tomorrow" class="page active">
+  <div class="grid two">
+    <div class="card">
+      <h1 id="tomorrowTitle">Demain</h1>
+      <div class="muted" id="tomorrowSubtitle"></div>
+      <h3>Mon statut</h3>
+      <div class="status-buttons">
+        <button class="status-btn status-present" data-status="present">● Présent</button>
+        <button class="status-btn status-absent" data-status="absent">○ Absent</button>
+        <button class="status-btn status-alone" data-status="alone">🚗 Seul</button>
+        <button class="status-btn status-time" data-status="time">⏱ Impératif horaire</button>
+      </div>
+      <div id="timeBox" class="row" style="margin-top:10px;display:none">
+        <div class="field"><label>Départ au plus tard</label><select id="timeLimit"></select></div>
+        <button class="btn" id="saveTime">Enregistrer</button>
+      </div>
+      <div id="tomorrowSaved" class="small muted" style="margin-top:10px"></div>
+      <div id="timeCompatibilityBox" class="compat-box" style="display:none"></div>
+    </div>
+    <div class="card">
+      <h2>Situation du groupe</h2>
+      <div id="collectiveTomorrow"></div>
+      <div class="footer-note">Les réponses sont partagées en temps réel entre tous les appareils associés.</div>
+    </div>
+  </div>
+</section>
+
+<section id="planning" class="page">
+  <div class="card">
+    <h1>Mon planning</h1>
+    <p class="muted">Renseigne une période entière d’un coup, puis modifie une journée si nécessaire.</p>
+    <div class="row">
+      <div class="field"><label>Du</label><input id="rangeStart" type="date"></div>
+      <div class="field"><label>Au</label><input id="rangeEnd" type="date"></div>
+      <div class="field"><label>Statut</label>
+        <select id="rangeStatus"><option value="present">Présent</option><option value="absent">Absent</option><option value="alone">Seul</option><option value="time">Impératif horaire</option></select>
+      </div>
+      <div class="field" id="rangeTimeField" style="display:none"><label>Heure maxi</label><select id="rangeTime"></select></div>
+      <button class="btn" id="applyRange">Appliquer aux jours ouvrés</button>
+    </div>
+    <h3>Prochains jours ouvrés</h3>
+    <div id="plannerList"></div>
+  </div>
+</section>
+
+<section id="groups" class="page">
+  <div class="grid two">
+    <div class="card">
+      <h1>Constituer les groupes</h1>
+      <div class="row"><div class="field"><label>Date</label><input id="groupDate" type="date"></div></div>
+      <div id="validatedTodayInfo"></div>
+      <h3>Personnes disponibles</h3>
+      <div id="availablePeople"></div>
+      <div id="groupCompatibilityMessage"></div>
+      <button class="btn secondary" id="addGroup" style="margin-top:10px">Ajouter le groupe sélectionné</button>
+      <div class="footer-note">Les personnes présentes sont pré-cochées. Après création d’un groupe, les personnes restantes sont pré-cochées automatiquement.</div>
+    </div>
+    <div class="card">
+      <h2>Groupes prévus</h2>
+      <div id="draftGroups"></div>
+      <button class="btn" id="validateTrips">✅ Valider les trajets réels</button>
+      <div id="validationMessage" class="small muted" style="margin-top:9px"></div>
+    </div>
+  </div>
+</section>
+
+<section id="summary" class="page">
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><h1>Mon bilan</h1><div class="muted" id="summaryUser"></div></div>
+      <select id="summaryPeriod" class="input"><option value="month">Ce mois</option><option value="year">Cette année</option><option value="all">Depuis le début</option></select>
+    </div>
+    <div class="kpis" style="margin-top:14px">
+      <div class="kpi"><span class="small muted">Conducteur</span><strong id="kDriver">0</strong><span class="small">fois</span></div>
+      <div class="kpi"><span class="small muted">Passager</span><strong id="kPassenger">0</strong><span class="small">fois</span></div>
+      <div class="kpi"><span class="small muted">Voiture économisée</span><strong id="kSaved">0</strong><span class="small">jours</span></div>
+      <div class="kpi"><span class="small muted">Jours covoiturés</span><strong id="kCarpooled">0</strong><span class="small">jours</span></div>
+      <div class="kpi"><span class="small muted">Présence connue</span><strong id="kPresent">0</strong><span class="small">jours</span></div>
+    </div>
+    <div class="grid two" style="margin-top:12px">
+      <div class="card" style="box-shadow:none"><h2>Détail des statuts saisis</h2><div id="statusStats"></div></div>
+      <div class="card" style="box-shadow:none"><h2>Lecture du bilan</h2><div id="summaryNote" class="muted"></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="history" class="page">
+  <div class="grid two">
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><div><h1>Historique</h1><div class="big" id="historyCount">0</div><div class="muted">trajets enregistrés</div></div><button id="exportHistory" class="btn secondary">⬇ Exporter CSV</button></div>
+      <div id="reviewBox" class="notice" style="display:none"><strong>Points historiques à vérifier</strong><div id="reviewList" class="small"></div></div>
+      <div class="footer-note">L’export CSV contient l’intégralité de l’historique et peut être conservé sur OneDrive comme sauvegarde indépendante.</div>
+    </div>
+    <div class="card">
+      <h2>Derniers trajets</h2>
+      <div class="row"><div class="field grow"><label>Filtrer</label><input id="historyFilter" placeholder="ex. Aurélien, AL, 2026-08"></div></div>
+      <div id="historyList" class="history-list"></div>
+    </div>
+  </div>
+</section>
+
+<section id="admin" class="page">
+  <div class="card">
+    <h1>Administration</h1>
+    <p class="muted">Réservé à Igor. Les liens personnels peuvent être utilisés sur plusieurs appareils.</p>
+    <div class="admin-grid">
+      <div><h2>Liens personnels</h2><div id="inviteList"></div></div>
+      <div><h2>Appareils associés</h2><div id="deviceList"></div></div>
+    </div>
+  </div>
+</section>
+</main>
+</div>
+<div id="toast" class="toast"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
