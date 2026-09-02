@@ -1,26 +1,16 @@
-V3 FINALE — FICHIERS PUBLICS GITHUB
+TEAM TOOL — mise à jour bilan + Prochain + saisie a posteriori
 
-Ce dossier ne contient PAS l'historique de covoiturage.
-L'historique est désormais stocké dans Firestore derrière les règles de sécurité.
+Nouveautés :
+- L’onglet « Prochain » affiche le jour courant avant 09:00, puis le prochain jour ouvré à partir de 09:00.
+- Sur une date passée, les 5 covoitureurs peuvent être sélectionnés librement dans Groupes, même si un statut Présent n’avait pas été saisi.
+- Le bilan sait exploiter les anciens statuts Excel importés : absent, seul, ou « absent ou seul » selon la période.
+- Import privé des statuts historiques via Admin > Complément d’historique Excel.
 
-Après migration :
-- déposer tous ces fichiers à la racine du dépôt GitHub team-tool ;
-- activer GitHub Pages sur main / root ;
-- utiliser les liens personnels générés pendant la migration.
+MISE À JOUR :
+1. Dans Firebase > Firestore > Règles, remplacer les règles par firestore.rules.final.txt et publier.
+2. Sur GitHub, remplacer les fichiers de l’application par ceux de ce dossier (NE PAS envoyer legacy_status_import.json sur GitHub).
+3. Attendre la mise à jour de GitHub Pages puis ouvrir l’application avec le profil Igor.
+4. Admin > Complément d’historique Excel > sélectionner le fichier legacy_status_import.json fourni séparément.
+5. Attendre « Import terminé » puis vérifier Mon bilan > Depuis le début.
 
-Fonctions V3 :
-- base commune en temps réel ;
-- multi-appareils par lien personnel ;
-- aucun mot de passe ;
-- planning anticipé ;
-- impératifs horaires par 15 min et compatibilités Oui/Non ;
-- présents pré-cochés ;
-- groupes multiples 2+2 / 2+3 ;
-- proposition du conducteur par historique exact ;
-- anti-doublons : une personne ne peut pas être dans deux groupes le même jour ;
-- validation remplace la journée existante au lieu d'ajouter un doublon ;
-- bilan personnel ;
-- export CSV ;
-- prénoms par ordre alphabétique ;
-- PWA installable iOS / Android / PC ;
-- administration des liens et appareils pour Igor.
+IMPORTANT : legacy_status_import.json contient des données historiques et doit rester privé (OneDrive ou PC). Il n’a pas à être mis sur GitHub.

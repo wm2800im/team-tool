@@ -43,7 +43,7 @@
     </div>
   </div>
   <nav id="nav">
-    <button data-page="tomorrow" class="active">Demain</button>
+    <button data-page="tomorrow" class="active">Prochain</button>
     <button data-page="planning">Planning</button>
     <button data-page="groups">Groupes</button>
     <button data-page="summary">Mon bilan</button>
@@ -55,7 +55,7 @@
 <section id="tomorrow" class="page active">
   <div class="grid two">
     <div class="card">
-      <h1 id="tomorrowTitle">Demain</h1>
+      <h1 id="tomorrowTitle">Prochain</h1>
       <div class="muted" id="tomorrowSubtitle"></div>
       <h3>Mon statut</h3>
       <div class="status-buttons">
@@ -107,7 +107,7 @@
       <div id="availablePeople"></div>
       <div id="groupCompatibilityMessage"></div>
       <button class="btn secondary" id="addGroup" style="margin-top:10px">Ajouter le groupe sélectionné</button>
-      <div class="footer-note">Les personnes présentes sont pré-cochées. Après création d’un groupe, les personnes restantes sont pré-cochées automatiquement.</div>
+      <div class="footer-note">Pour aujourd’hui et le futur, les personnes présentes sont pré-cochées. Pour une date passée, les 5 covoitureurs restent sélectionnables afin de corriger ou saisir un trajet a posteriori.</div>
     </div>
     <div class="card">
       <h2>Groupes prévus</h2>
@@ -129,7 +129,7 @@
       <div class="kpi"><span class="small muted">Passager</span><strong id="kPassenger">0</strong><span class="small">fois</span></div>
       <div class="kpi"><span class="small muted">Voiture économisée</span><strong id="kSaved">0</strong><span class="small">jours</span></div>
       <div class="kpi"><span class="small muted">Jours covoiturés</span><strong id="kCarpooled">0</strong><span class="small">jours</span></div>
-      <div class="kpi"><span class="small muted">Présence connue</span><strong id="kPresent">0</strong><span class="small">jours</span></div>
+      <div class="kpi"><span class="small muted">Jours renseignés</span><strong id="kPresent">0</strong><span class="small">jours</span></div>
     </div>
     <div class="grid two" style="margin-top:12px">
       <div class="card" style="box-shadow:none"><h2>Détail des statuts saisis</h2><div id="statusStats"></div></div>
@@ -160,6 +160,12 @@
     <div class="admin-grid">
       <div><h2>Liens personnels</h2><div id="inviteList"></div></div>
       <div><h2>Appareils associés</h2><div id="deviceList"></div></div>
+    </div>
+    <div class="card" style="box-shadow:none;margin-top:12px">
+      <h2>Complément d’historique Excel</h2>
+      <p class="muted">Import privé des anciens statuts (colonnes I/A/S/E/L). Le fichier reste sur ton PC et les données sont envoyées directement dans Firestore ; rien n’est ajouté au dépôt GitHub.</p>
+      <div class="field"><label>Fichier JSON fourni pour l’import</label><input id="legacyImportFile" type="file" accept="application/json,.json"></div>
+      <div id="legacyImportStatus" class="small muted" style="margin-top:8px">Aucun import lancé.</div>
     </div>
   </div>
 </section>

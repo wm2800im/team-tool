@@ -59,6 +59,11 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    match /legacyStatus/{docId} {
+      allow read: if isLinked();
+      allow create, update, delete: if isAdmin();
+    }
+
     match /availability/{docId} {
       allow read: if isLinked();
       allow create: if isLinked()

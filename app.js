@@ -3,7 +3,7 @@ import {
   getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
 import {
-  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc,
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch,
   onSnapshot, serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
@@ -30,6 +30,7 @@ let authUser = null;
 let profileId = null;
 let profiles = new Map();
 let availability = new Map();
+let legacyStatus = new Map();
 let compatibilities = new Map();
 let plans = new Map();
 let tripDays = new Map();
@@ -51,12 +52,21 @@ const iso = d => {
 };
 const fromISO = s => new Date(`${s}T12:00:00`);
 const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x; };
-const tomorrowISO = () => iso(addDays(new Date(),1));
+const todayISO = () => iso(new Date());
+const isWeekend = d => d.getDay()===0 || d.getDay()===6;
+const nextCarpoolISO = () => {
+  let d=new Date();
+  if(d.getHours()>=9) d=addDays(d,1);
+  while(isWeekend(d)) d=addDays(d,1);
+  return iso(d);
+};
+const isPastDate = ds => ds < todayISO();
 const fmtDate = (s, opts={weekday:'long',day:'numeric',month:'long'}) => fromISO(s).toLocaleDateString('fr-FR',opts);
 const nowYear = () => String(new Date().getFullYear());
 const currentYM = () => iso(new Date()).slice(0,7);
 const availKey = (date,pid) => `${date}_${pid}`;
 const compatKey = (date,owner,responder) => `${date}_${owner}_${responder}`;
+const legacyKey = (date,pid) => `${date}_${pid}`;
 const baseAppUrl = () => `${location.origin}${location.pathname.replace(/index\.html$/,'').replace(/\/$/,'')}/`;
 
 function toast(msg){
@@ -146,12 +156,13 @@ function subscribeSharedData(){
   const watch=(name,ref,handler)=>{
     const off=onSnapshot(ref,snap=>{
       handler(snap); initializedSnapshots.add(name);
-      if(initializedSnapshots.size>=5){ hideLoading(); renderAll(); }
+      if(initializedSnapshots.size>=6){ hideLoading(); renderAll(); }
     },err=>{console.error(name,err);$('syncDot').classList.add('off');$('syncText').textContent='Erreur de synchronisation';});
     unsubscribers.push(off);
   };
   watch('profiles',collection(db,'profiles'),snap=>{ profiles=new Map(snap.docs.map(d=>[d.id,d.data()])); $('identityName').textContent=label(profileId); });
   watch('availability',collection(db,'availability'),snap=>{ availability=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
+  watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
   watch('compatibilities',collection(db,'compatibilities'),snap=>{ compatibilities=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
   watch('plans',collection(db,'plans'),snap=>{ plans=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
   watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
@@ -163,10 +174,10 @@ async function loadReviewConfig(){
 
 function initStaticUI(){
   fillTimeSelect($('timeLimit'),'16:15'); fillTimeSelect($('rangeTime'),'16:15');
-  const t=tomorrowISO(); $('groupDate').value=t; $('rangeStart').value=t; $('rangeEnd').value=iso(addDays(fromISO(t),4));
+  const t=nextCarpoolISO(); $('groupDate').value=t; $('rangeStart').value=t; $('rangeEnd').value=iso(addDays(fromISO(t),4));
   qsa('#nav button[data-page]').forEach(b=>b.addEventListener('click',()=>openPage(b.dataset.page)));
   qsa('.status-btn').forEach(b=>b.addEventListener('click',()=>handleTomorrowStatus(b.dataset.status)));
-  $('saveTime').addEventListener('click',()=>setAvailability(tomorrowISO(),'time',$('timeLimit').value));
+  $('saveTime').addEventListener('click',()=>setAvailability(nextCarpoolISO(),'time',$('timeLimit').value));
   $('rangeStatus').addEventListener('change',()=>{$('rangeTimeField').style.display=$('rangeStatus').value==='time'?'flex':'none';});
   $('applyRange').addEventListener('click',applyRange);
   $('groupDate').addEventListener('change',renderGroups);
@@ -176,6 +187,8 @@ function initStaticUI(){
   $('historyFilter').addEventListener('input',renderHistory);
   $('exportHistory').addEventListener('click',exportHistoryCSV);
   $('installBtn').addEventListener('click',installPwa);
+  if($('legacyImportFile')) $('legacyImportFile').addEventListener('change',importLegacyStatusFile);
+  setInterval(()=>{ if($('tomorrow')?.classList.contains('active')) renderTomorrow(); },60000);
   window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installBtn').style.display='inline-block';});
   if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(console.warn);
 }
@@ -196,10 +209,10 @@ function openPage(page){
 
 async function handleTomorrowStatus(st){
   if(st==='time'){
-    const v=getAvail(tomorrowISO(),profileId); $('timeLimit').value=v?.time||'16:15'; $('timeBox').style.display='flex';
+    const v=getAvail(nextCarpoolISO(),profileId); $('timeLimit').value=v?.time||'16:15'; $('timeBox').style.display='flex';
     return;
   }
-  $('timeBox').style.display='none'; await setAvailability(tomorrowISO(),st,null);
+  $('timeBox').style.display='none'; await setAvailability(nextCarpoolISO(),st,null);
 }
 async function setAvailability(date,status,time=null){
   try{
@@ -218,8 +231,8 @@ function renderAll(){
   renderTomorrow(); renderPlanning(); renderGroups(); renderSummary(); renderHistory();
 }
 function renderTomorrow(){
-  const ds=tomorrowISO();
-  $('tomorrowTitle').textContent=`Demain — ${fmtDate(ds)}`;
+  const ds=nextCarpoolISO();
+  $('tomorrowTitle').textContent=`Prochain — ${fmtDate(ds)}`;
   $('tomorrowSubtitle').textContent='Indique ton statut ; tu peux le modifier à tout moment.';
   const mine=getAvail(ds,profileId);
   qsa('.status-btn').forEach(b=>b.classList.toggle('selected',mine?.status===b.dataset.status));
@@ -266,7 +279,7 @@ function workingDays(start,count){
 }
 function renderPlanning(){
   const list=$('plannerList'); if(!list)return; list.innerHTML='';
-  workingDays(tomorrowISO(),15).forEach(ds=>{
+  workingDays(nextCarpoolISO(),15).forEach(ds=>{
     const v=getAvail(ds,profileId); const row=document.createElement('div');row.className='planner-row';
     row.innerHTML=`<strong>${fmtDate(ds,{weekday:'short',day:'numeric',month:'short'})}</strong>
       <select data-day="${ds}" class="planner-select input"><option value="">Non renseigné</option><option value="present">Présent</option><option value="absent">Absent</option><option value="alone">Seul</option><option value="time">Impératif horaire</option></select>`;
@@ -315,13 +328,14 @@ function unknownCompatibilities(date,members){
   }); return out;
 }
 function renderGroups(){
-  if(!$('availablePeople'))return; const ds=$('groupDate').value||tomorrowISO();
-  const groups=currentPlan(ds); const assigned=new Set(groups.flatMap(g=>g.members));
+  if(!$('availablePeople'))return; const ds=$('groupDate').value||nextCarpoolISO();
+  const past=isPastDate(ds); const groups=currentPlan(ds); const assigned=new Set(groups.flatMap(g=>g.members));
   const box=$('availablePeople');box.innerHTML='';
   PEOPLE.forEach(p=>{
-    const v=getAvail(ds,p),m=statusMeta(v); const can=isAvailable(v)&&!assigned.has(p);
+    const v=getAvail(ds,p),m=statusMeta(v); const can=!assigned.has(p) && (past || isAvailable(v));
     const row=document.createElement('label');row.className='person-row';
-    row.innerHTML=`<input type="checkbox" class="group-check" value="${p}" ${can?'checked':'disabled'}><div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong><div class="small muted">${assigned.has(p)?'Déjà dans un groupe':m.label}</div></div>`;
+    const info=assigned.has(p)?'Déjà dans un groupe':(past?`${m.label} · saisie a posteriori`:m.label);
+    row.innerHTML=`<input type="checkbox" class="group-check" value="${p}" ${can?'checked':'disabled'}><div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong><div class="small muted">${info}</div></div>`;
     box.appendChild(row);
   });
   box.querySelectorAll('.group-check').forEach(c=>c.addEventListener('change',()=>renderGroupCompatibilityMessage(ds)));
@@ -330,6 +344,11 @@ function renderGroups(){
 function renderGroupCompatibilityMessage(ds){
   const members=qsa('.group-check:checked').map(x=>x.value),msg=$('groupCompatibilityMessage');
   if(members.length<2){msg.innerHTML='';return;}
+  if(isPastDate(ds)){
+    const unusual=members.filter(p=>!isAvailable(getAvail(ds,p))).map(p=>`${label(p)} (${statusMeta(getAvail(ds,p)).label})`);
+    msg.innerHTML=`<div class="notice oknotice"><strong>Saisie a posteriori</strong><div class="small">Tous les covoitureurs peuvent être sélectionnés, même sans statut « Présent ».${unusual.length?` Sélection actuelle : ${unusual.join(' · ')}.`:''}</div></div>`;
+    return;
+  }
   const bad=explicitIncompatibilities(ds,members),unknown=unknownCompatibilities(ds,members);
   if(bad.length)msg.innerHTML=`<div class="group-error">❌ Groupe incompatible : ${bad.map(x=>`${label(x.responder)} a refusé ${x.time} avec ${label(x.owner)}`).join(' · ')}</div>`;
   else if(unknown.length)msg.innerHTML=`<div class="group-warning">⚠️ Compatibilité non confirmée : ${unknown.map(x=>`${label(x.responder)} ↔ ${label(x.owner)} ${x.time}`).join(' · ')}</div>`;
@@ -348,7 +367,7 @@ function driverSuggestion(ds,members){
 async function addSelectedGroup(){
   const ds=$('groupDate').value;const members=qsa('.group-check:checked').map(x=>x.value);
   if(members.length<2||members.length>5){alert('Sélectionne entre 2 et 5 personnes.');return;}
-  const bad=explicitIncompatibilities(ds,members);if(bad.length){alert('Ce groupe contient une incompatibilité horaire explicite.');return;}
+  const bad=isPastDate(ds)?[]:explicitIncompatibilities(ds,members);if(bad.length){alert('Ce groupe contient une incompatibilité horaire explicite.');return;}
   const sug=driverSuggestion(ds,members);const groups=[...currentPlan(ds),{id:crypto.randomUUID(),members:canonical(members),driver:sug.candidates[0]||canonical(members)[0]}];
   await savePlan(ds,groups);toast('Groupe ajouté.');
 }
@@ -376,7 +395,7 @@ function groupsHaveOverlap(groups){
 async function validateTrips(){
   const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;
   const overlap=groupsHaveOverlap(groups);if(overlap){alert(`${label(overlap)} apparaît dans plusieurs groupes. Corrige avant de valider.`);return;}
-  for(const g of groups){if(g.members.length<2||!g.members.includes(g.driver)){alert('Un groupe est invalide.');return;}if(explicitIncompatibilities(ds,g.members).length){alert('Un groupe contient une incompatibilité horaire.');return;}}
+  for(const g of groups){if(g.members.length<2||!g.members.includes(g.driver)){alert('Un groupe est invalide.');return;}if(!isPastDate(ds)&&explicitIncompatibilities(ds,g.members).length){alert('Un groupe contient une incompatibilité horaire.');return;}}
   const existing=tripDays.get(ds);
   if(existing?.groups?.length && !confirm(`Des trajets sont déjà validés pour ${fmtDate(ds)}. La validation remplacera entièrement les groupes existants pour cette date. Continuer ?`))return;
   const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver,source:'v3'}));
@@ -407,15 +426,41 @@ function renderSummary(){
   if(!$('summaryUser'))return;const period=$('summaryPeriod').value;$('summaryUser').textContent=label(profileId);
   let driver=0,passenger=0;const carpoolDates=new Set();
   flattenTrips().filter(t=>periodMatch(t.date,period)).forEach(t=>{if(t.participants.includes(profileId)){carpoolDates.add(t.date);if(t.driver===profileId)driver++;else passenger++;}});
-  const av=[...availability.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period));
-  let present=0,alone=0,absent=0,time=0;const knownPresent=new Set(carpoolDates);
-  av.forEach(v=>{if(v.status==='present'){present++;knownPresent.add(v.date);}else if(v.status==='time'){present++;time++;knownPresent.add(v.date);}else if(v.status==='alone'){alone++;knownPresent.add(v.date);}else if(v.status==='absent')absent++;});
-  $('kDriver').textContent=driver;$('kPassenger').textContent=passenger;$('kSaved').textContent=passenger;$('kCarpooled').textContent=driver+passenger;$('kPresent').textContent=knownPresent.size;
-  $('statusStats').innerHTML=`<div class="person-row"><span class="grow">Présent renseigné</span><strong>${present}</strong></div><div class="person-row"><span class="grow">Seul</span><strong>${alone}</strong></div><div class="person-row"><span class="grow">Absent</span><strong>${absent}</strong></div><div class="person-row"><span class="grow">Avec impératif horaire</span><strong>${time}</strong></div>`;
-  const rate=knownPresent.size?Math.round((carpoolDates.size/knownPresent.size)*100):0;
-  $('summaryNote').innerHTML=`<p><strong>${passenger} jour(s)</strong> où ta voiture n’a pas été utilisée grâce au covoiturage.</p><p>Taux de covoiturage sur les jours de présence connus : <strong>${rate}%</strong>.</p><p class="small">Avant la V3, l’historique permet de connaître précisément les jours covoiturés, mais pas toujours de distinguer les anciens jours « absent » et « seul ». Le nombre de présence historique est donc un minimum connu ; à partir de la V3, le bilan devient complet.</p>`;
-}
 
+  const current=[...availability.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period));
+  const currentByDate=new Map(current.map(v=>[v.date,v]));
+  let present=0,alone=0,absent=0,time=0;
+  current.forEach(v=>{if(v.status==='present')present++;else if(v.status==='time'){present++;time++;}else if(v.status==='alone')alone++;else if(v.status==='absent')absent++;});
+
+  const legacy=[...legacyStatus.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period)&&!currentByDate.has(v.date)&&!carpoolDates.has(v.date));
+  let legacyAbsent=0,legacyAlone=0,legacyAmbiguous=0;
+  legacy.forEach(v=>{if(v.legacyStatus==='absent')legacyAbsent++;else if(v.legacyStatus==='alone')legacyAlone++;else if(v.legacyStatus==='absent_or_alone')legacyAmbiguous++;});
+
+  const trackedDates=new Set(carpoolDates);
+  current.forEach(v=>trackedDates.add(v.date)); legacy.forEach(v=>trackedDates.add(v.date));
+  const exactPresenceDates=new Set(carpoolDates);
+  current.forEach(v=>{if(v.status==='present'||v.status==='time'||v.status==='alone')exactPresenceDates.add(v.date);});
+  legacy.forEach(v=>{if(v.legacyStatus==='alone')exactPresenceDates.add(v.date);});
+
+  $('kDriver').textContent=driver;$('kPassenger').textContent=passenger;$('kSaved').textContent=passenger;$('kCarpooled').textContent=carpoolDates.size;$('kPresent').textContent=trackedDates.size;
+  $('statusStats').innerHTML=`
+    <div class="person-row"><span class="grow">Présent renseigné (nouvelle appli)</span><strong>${present}</strong></div>
+    <div class="person-row"><span class="grow">Seul (nouvelle appli)</span><strong>${alone}</strong></div>
+    <div class="person-row"><span class="grow">Absent (nouvelle appli)</span><strong>${absent}</strong></div>
+    <div class="person-row"><span class="grow">Avec impératif horaire</span><strong>${time}</strong></div>
+    <div class="person-row"><span class="grow">Absent historique certain</span><strong>${legacyAbsent}</strong></div>
+    <div class="person-row"><span class="grow">Seul historique certain</span><strong>${legacyAlone}</strong></div>
+    <div class="person-row"><span class="grow">Absent ou seul (ancien Excel)</span><strong>${legacyAmbiguous}</strong></div>`;
+
+  let rateText='';
+  if(legacyAmbiguous===0){
+    const rate=exactPresenceDates.size?Math.round((carpoolDates.size/exactPresenceDates.size)*100):0;
+    rateText=`<p>Taux de covoiturage sur les jours de présence identifiables : <strong>${rate}%</strong>.</p>`;
+  }else{
+    rateText=`<p>Le taux historique exact n’est pas affiché : <strong>${legacyAmbiguous} jour(s)</strong> de l’ancien Excel sont codés « absent ou seul » et ne permettent pas de distinguer les deux situations.</p>`;
+  }
+  $('summaryNote').innerHTML=`<p><strong>${passenger} jour(s)</strong> où ta voiture n’a pas été utilisée grâce au covoiturage.</p>${rateText}<p><strong>${trackedDates.size} jour(s)</strong> disposent d’une information exploitable sur cette période (trajet ou statut). Les statuts historiques détaillés sont récupérés à partir de juin 2022 ; les trajets, eux, remontent à 2020.</p>`;
+}
 function renderHistory(){
   if(!$('historyList'))return;const all=flattenTrips().sort((a,b)=>b.date.localeCompare(a.date));$('historyCount').textContent=all.length;
   if(reviewItems?.length){$('reviewBox').style.display='block';$('reviewList').innerHTML=reviewItems.map(x=>`<div>• ${x.date} — ${x.raw||x.reason} <span class="muted">(${x.reason})</span></div>`).join('');}else $('reviewBox').style.display='none';
@@ -458,6 +503,30 @@ async function renderAdmin(){
     $('deviceList').querySelectorAll('.revoke-device').forEach(b=>b.addEventListener('click',()=>revokeDevice(b.dataset.uid)));
   }catch(e){$('inviteList').innerHTML=`<div class="notice danger">${friendlyError(e)}</div>`;$('deviceList').innerHTML='';}
 }
+async function importLegacyStatusFile(event){
+  if(profileId!=='igor')return;
+  const file=event.target.files?.[0]; if(!file)return;
+  try{
+    const payload=JSON.parse(await file.text());
+    const records=Array.isArray(payload)?payload:payload.records;
+    if(!Array.isArray(records)||!records.length) throw new Error('Fichier sans enregistrements.');
+    if(!confirm(`Importer ${records.length} statuts historiques dans la base commune ? Les documents portant le même identifiant seront remplacés.`)){event.target.value='';return;}
+    const status=$('legacyImportStatus'); if(status)status.textContent='Import en cours…';
+    let done=0;
+    for(let i=0;i<records.length;i+=400){
+      const batch=writeBatch(db);
+      records.slice(i,i+400).forEach(r=>{
+        if(!r.date||!r.profileId||!r.legacyStatus)return;
+        const id=legacyKey(r.date,r.profileId);
+        batch.set(doc(db,'legacyStatus',id),{date:r.date,profileId:r.profileId,legacyStatus:r.legacyStatus,code:r.code??null,source:r.source||'ancien Excel',importedAt:serverTimestamp()});
+      });
+      await batch.commit(); done=Math.min(i+400,records.length); if(status)status.textContent=`${done}/${records.length} importés…`;
+    }
+    if(status)status.textContent=`Import terminé : ${records.length} statuts historiques.`;
+    toast('Statuts historiques importés.');
+  }catch(e){console.error(e);alert(`Import impossible : ${friendlyError(e)}`);}finally{event.target.value='';}
+}
+
 function randomToken(){const b=new Uint8Array(24);crypto.getRandomValues(b);return [...b].map(x=>x.toString(16).padStart(2,'0')).join('');}
 async function regenerateInvite(pid,invs=[]){
   if(!confirm(`Régénérer le lien personnel de ${label(pid)} ? Les appareils déjà associés continueront de fonctionner.`))return;
