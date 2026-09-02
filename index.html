@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#203a5f">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="Team Tool">
-<title>Team Tool</title>
+<meta name="apple-mobile-web-app-title" content="Covoiturage">
+<title>Covoiturage</title>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="stylesheet" href="./styles.css">
@@ -24,10 +24,11 @@
 <div id="accessScreen" style="display:none">
   <main>
     <div class="card access-card">
-      <h1>Accès à Team Tool</h1>
-      <p class="muted">Cet appareil n’est pas encore associé à un covoitureur.</p>
-      <div class="notice"><strong>À faire une seule fois sur cet appareil</strong><br>Ouvre le lien personnel reçu sur WhatsApp. Ensuite cet appareil restera reconnu automatiquement.</div>
-      <p class="small muted">Tu peux utiliser le même lien personnel sur ton téléphone et sur ton PC.</p>
+      <div class="access-brand"><img src="./icon-192.png" alt="" class="access-icon"><div><h1>Accès à Covoiturage</h1><p class="muted" style="margin-top:2px">Cet appareil n’est pas encore lié à ton profil.</p></div></div>
+      <div class="notice"><strong>À faire une seule fois sur cet appareil</strong><br>Colle ton lien personnel d’invitation ci-dessous. Le même lien peut servir pour ton navigateur, ta PWA et ton PC.</div>
+      <div class="field" style="margin-top:14px"><label>Mon lien personnel ou mon code d’invitation</label><input id="deviceInviteInput" type="text" inputmode="url" autocomplete="off" placeholder="https://…?invite=… ou code d’invitation"></div>
+      <div class="row" style="margin-top:10px"><button id="linkDeviceBtn" class="btn">🔗 Lier cet appareil</button><button id="pasteInviteBtn" class="btn secondary">Coller</button></div>
+      <p class="small muted">Une fois lié, l’appareil restera reconnu automatiquement. Aucun mot de passe n’est nécessaire.</p>
       <div id="accessError" class="notice danger" style="display:none"></div>
     </div>
   </main>
@@ -36,7 +37,7 @@
 <div id="appShell" style="display:none">
 <header>
   <div class="header-row">
-    <div><div class="brand">🚗 Covoiturage</div><div class="tag"><span id="syncDot" class="sync-dot"></span><span id="syncText">Base commune</span></div></div>
+    <div><div class="brand">🚗 Covoiturage</div><div class="tag"><span id="syncDot" class="sync-dot"></span><span id="syncText">Base commune</span> <span class="version">· v4.2</span></div></div>
     <div class="row">
       <button id="installBtn" class="btn secondary smallbtn" style="display:none">Installer</button>
       <div class="identity"><span class="dot"></span><span id="identityName">—</span></div>

@@ -72,3 +72,10 @@ p{margin:8px 0}
   h1{font-size:21px}.big{font-size:29px}.identity{font-size:13px;padding:6px 8px}
 }
 @media(display-mode:standalone){.install-tip{display:none!important}}
+
+/* V4.2 — liaison PWA / identité visuelle */
+.access-brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.access-icon{width:58px;height:58px;border-radius:14px;box-shadow:0 4px 14px rgba(16,24,40,.14);flex:0 0 auto}
+.access-card input[type=text]{width:100%;font-size:14px}
+.version{opacity:.72}
+@media(max-width:520px){.access-brand{align-items:flex-start}.access-card{margin-top:4vh}.access-icon{width:52px;height:52px}}

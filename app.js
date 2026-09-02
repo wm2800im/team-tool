@@ -38,6 +38,8 @@ let reviewItems = REVIEW_DEFAULT;
 let unsubscribers = [];
 let installPrompt = null;
 let initializedSnapshots = new Set();
+let appUiInitialized = false;
+let accessUiInitialized = false;
 
 const $ = id => document.getElementById(id);
 const qsa = sel => [...document.querySelectorAll(sel)];
@@ -111,6 +113,7 @@ function getCompat(date,owner,responder){ return compatibilities.get(compatKey(d
 
 async function start(){
   try{
+    initAccessUI();
     setLoading('Connexion à la base commune…','Identification de cet appareil.');
     await setPersistence(auth,browserLocalPersistence);
     if(!auth.currentUser) await signInAnonymously(auth);
@@ -122,14 +125,95 @@ async function start(){
     }
     await resolveDeviceIdentity();
     if(!profileId) return;
-    showApp();
-    $('identityName').textContent=label(profileId);
-    if(profileId==='igor') $('adminNav').classList.remove('hidden');
-    initStaticUI();
-    subscribeSharedData();
+    launchLinkedApp();
   }catch(err){
     console.error(err);
     showAccess(`Connexion impossible : ${friendlyError(err)}`);
+  }
+}
+
+function launchLinkedApp(){
+  if(appUiInitialized) return;
+  appUiInitialized=true;
+  showApp();
+  $('identityName').textContent=label(profileId);
+  if(profileId==='igor') $('adminNav').classList.remove('hidden');
+  initStaticUI();
+  subscribeSharedData();
+}
+
+function initAccessUI(){
+  if(accessUiInitialized) return;
+  accessUiInitialized=true;
+  const input=$('deviceInviteInput');
+  const linkBtn=$('linkDeviceBtn');
+  const pasteBtn=$('pasteInviteBtn');
+  if(linkBtn) linkBtn.addEventListener('click',linkDeviceFromInput);
+  if(input) input.addEventListener('keydown',e=>{if(e.key==='Enter')linkDeviceFromInput();});
+  if(pasteBtn) pasteBtn.addEventListener('click',async()=>{
+    try{
+      const txt=await navigator.clipboard.readText();
+      if(txt){ input.value=txt.trim(); input.focus(); }
+    }catch(e){
+      input.focus();
+      showAccessError('Le collage automatique est bloqué par le navigateur. Fais un appui long dans le champ puis « Coller ».');
+    }
+  });
+}
+
+function showAccessError(message=''){
+  const el=$('accessError');
+  if(!el) return;
+  el.style.display=message?'block':'none';
+  el.textContent=message;
+}
+
+function extractInviteToken(raw){
+  const value=(raw||'').trim();
+  if(!value) return null;
+  try{
+    const u=new URL(value);
+    const token=u.searchParams.get('invite');
+    if(token) return token.trim();
+  }catch(e){}
+  const m=value.match(/[?&]invite=([^&#]+)/i);
+  if(m) return decodeURIComponent(m[1]).trim();
+  // Les tokens générés par l'application sont 48 caractères hexadécimaux.
+  if(/^[a-f0-9]{48}$/i.test(value)) return value.toLowerCase();
+  return null;
+}
+
+async function associateInviteToken(invite){
+  const invRef=doc(db,'invitations',invite);
+  const invSnap=await getDoc(invRef);
+  if(!invSnap.exists() || invSnap.data().active!==true){
+    throw new Error('Ce lien personnel est invalide ou a été désactivé. Demande un nouveau lien à Igor.');
+  }
+  const pid=invSnap.data().profileId;
+  await setDoc(doc(db,'deviceLinks',authUser.uid),{
+    profileId:pid, inviteToken:invite, createdAt:serverTimestamp(), userAgent:navigator.userAgent.slice(0,300)
+  });
+  profileId=pid;
+  return pid;
+}
+
+async function linkDeviceFromInput(){
+  const input=$('deviceInviteInput');
+  const token=extractInviteToken(input?.value);
+  showAccessError('');
+  if(!token){
+    showAccessError('Colle le lien personnel complet reçu sur WhatsApp, ou uniquement son code d’invitation.');
+    return;
+  }
+  try{
+    setLoading('Liaison de cet appareil…','Vérification du lien personnel.');
+    const pid=await associateInviteToken(token);
+    cleanInviteParam();
+    launchLinkedApp();
+    toast(`Cet appareil est maintenant associé à ${label(pid)}.`);
+  }catch(e){
+    console.error(e);
+    showAccess(e?.message || friendlyError(e));
   }
 }
 
@@ -146,19 +230,13 @@ async function resolveDeviceIdentity(){
   }
   if(!invite){ showAccess(); return; }
   setLoading('Association de cet appareil…','Vérification du lien personnel.');
-  const invRef=doc(db,'invitations',invite);
-  const invSnap=await getDoc(invRef);
-  if(!invSnap.exists() || invSnap.data().active!==true){
-    showAccess('Ce lien personnel est invalide ou a été désactivé. Demande un nouveau lien à Igor.');
-    return;
+  try{
+    const pid=await associateInviteToken(invite);
+    cleanInviteParam();
+    toast(`Cet appareil est maintenant associé à ${label(pid)}.`);
+  }catch(e){
+    showAccess(e?.message || friendlyError(e));
   }
-  const pid=invSnap.data().profileId;
-  await setDoc(linkRef,{
-    profileId:pid, inviteToken:invite, createdAt:serverTimestamp(), userAgent:navigator.userAgent.slice(0,300)
-  });
-  profileId=pid;
-  cleanInviteParam();
-  toast(`Cet appareil est maintenant associé à ${label(pid)}.`);
 }
 function cleanInviteParam(){
   const u=new URL(location.href); u.searchParams.delete('invite'); history.replaceState({},'',u.pathname+u.search+u.hash);
