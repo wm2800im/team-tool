@@ -52,18 +52,37 @@ const iso = d => {
 };
 const fromISO = s => new Date(`${s}T12:00:00`);
 const addDays = (d,n) => { const x=new Date(d); x.setDate(x.getDate()+n); return x; };
-const todayISO = () => iso(new Date());
+// Le covoiturage fonctionne sur l'heure locale France/Suisse (même fuseau horaire).
+// On ne dépend volontairement pas du fuseau configuré sur le navigateur/appareil,
+// afin d'éviter un décalage de date autour de minuit.
+const APP_TIME_ZONE = 'Europe/Paris';
+const appNowParts = () => {
+  const parts = new Intl.DateTimeFormat('fr-FR', {
+    timeZone: APP_TIME_ZONE,
+    year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', hourCycle:'h23'
+  }).formatToParts(new Date());
+  const get = type => parts.find(p=>p.type===type)?.value;
+  return { year:Number(get('year')), month:Number(get('month')), day:Number(get('day')), hour:Number(get('hour')) };
+};
+const appTodayISO = () => {
+  const n=appNowParts();
+  return `${n.year}-${String(n.month).padStart(2,'0')}-${String(n.day).padStart(2,'0')}`;
+};
+const todayISO = () => appTodayISO();
 const isWeekend = d => d.getDay()===0 || d.getDay()===6;
 const nextCarpoolISO = () => {
-  let d=new Date();
-  if(d.getHours()>=9) d=addDays(d,1);
+  const n=appNowParts();
+  let d=fromISO(appTodayISO());
+  // Jusqu'à 08:59 inclus : le covoiturage courant reste celui d'aujourd'hui.
+  // À partir de 09:00 : on passe au prochain jour ouvré.
+  if(n.hour>=9) d=addDays(d,1);
   while(isWeekend(d)) d=addDays(d,1);
   return iso(d);
 };
 const isPastDate = ds => ds < todayISO();
 const fmtDate = (s, opts={weekday:'long',day:'numeric',month:'long'}) => fromISO(s).toLocaleDateString('fr-FR',opts);
-const nowYear = () => String(new Date().getFullYear());
-const currentYM = () => iso(new Date()).slice(0,7);
+const nowYear = () => appTodayISO().slice(0,4);
+const currentYM = () => appTodayISO().slice(0,7);
 const availKey = (date,pid) => `${date}_${pid}`;
 const compatKey = (date,owner,responder) => `${date}_${owner}_${responder}`;
 const legacyKey = (date,pid) => `${date}_${pid}`;
@@ -187,7 +206,14 @@ function initStaticUI(){
   $('historyFilter').addEventListener('input',renderHistory);
   $('exportHistory').addEventListener('click',exportHistoryCSV);
   $('installBtn').addEventListener('click',installPwa);
-  if($('legacyImportFile')) $('legacyImportFile').addEventListener('change',importLegacyStatusFile);
+  if($('legacyImportFile')) $('legacyImportFile').addEventListener('change',()=>{
+    const file=$('legacyImportFile').files?.[0];
+    const btn=$('legacyImportButton');
+    if(btn) btn.disabled=!file;
+    const status=$('legacyImportStatus');
+    if(status) status.textContent=file?`Fichier sélectionné : ${file.name}`:'Aucun import lancé.';
+  });
+  if($('legacyImportButton')) $('legacyImportButton').addEventListener('click',importLegacyStatusSelected);
   setInterval(()=>{ if($('tomorrow')?.classList.contains('active')) renderTomorrow(); },60000);
   window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installBtn').style.display='inline-block';});
   if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(console.warn);
@@ -503,14 +529,16 @@ async function renderAdmin(){
     $('deviceList').querySelectorAll('.revoke-device').forEach(b=>b.addEventListener('click',()=>revokeDevice(b.dataset.uid)));
   }catch(e){$('inviteList').innerHTML=`<div class="notice danger">${friendlyError(e)}</div>`;$('deviceList').innerHTML='';}
 }
-async function importLegacyStatusFile(event){
+async function importLegacyStatusSelected(){
   if(profileId!=='igor')return;
-  const file=event.target.files?.[0]; if(!file)return;
+  const input=$('legacyImportFile');
+  const file=input?.files?.[0];
+  if(!file){ alert('Choisis d’abord le fichier JSON à importer.'); return; }
   try{
     const payload=JSON.parse(await file.text());
     const records=Array.isArray(payload)?payload:payload.records;
     if(!Array.isArray(records)||!records.length) throw new Error('Fichier sans enregistrements.');
-    if(!confirm(`Importer ${records.length} statuts historiques dans la base commune ? Les documents portant le même identifiant seront remplacés.`)){event.target.value='';return;}
+    if(!confirm(`Importer ${records.length} statuts historiques dans la base commune ? Les documents portant le même identifiant seront remplacés.`)) return;
     const status=$('legacyImportStatus'); if(status)status.textContent='Import en cours…';
     let done=0;
     for(let i=0;i<records.length;i+=400){
@@ -524,7 +552,10 @@ async function importLegacyStatusFile(event){
     }
     if(status)status.textContent=`Import terminé : ${records.length} statuts historiques.`;
     toast('Statuts historiques importés.');
-  }catch(e){console.error(e);alert(`Import impossible : ${friendlyError(e)}`);}finally{event.target.value='';}
+  }catch(e){console.error(e);alert(`Import impossible : ${friendlyError(e)}`);}finally{
+    if(input) input.value='';
+    const btn=$('legacyImportButton'); if(btn) btn.disabled=true;
+  }
 }
 
 function randomToken(){const b=new Uint8Array(24);crypto.getRandomValues(b);return [...b].map(x=>x.toString(16).padStart(2,'0')).join('');}
