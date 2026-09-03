@@ -1,4 +1,5 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js';
+import { getMessaging, getToken, deleteToken, onMessage, isSupported as messagingSupported } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-messaging.js';
 import {
   getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
@@ -6,11 +7,17 @@ import {
   getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch,
   onSnapshot, serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
-import { firebaseConfig } from './firebase-config.js';
-
+const ENV = globalThis.COVOIT_ENV || {};
+const firebaseConfig = ENV.firebaseConfig || {};
+const APP_VERSION = ENV.version || '4.4.0';
+const IS_TEST = ENV.environment === 'test';
+const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+let messaging = null;
+let messagingSwRegistration = null;
+let currentFcmToken = null;
 
 const PEOPLE = ['aurelien','etienne','igor','ludo','stephane'];
 const LABELS = {aurelien:'Aurélien',etienne:'Étienne',igor:'Igor',ludo:'Ludo',stephane:'Stéphane'};
@@ -19,22 +26,19 @@ const STATUS = {
   present:{label:'Présent',cls:'present'}, absent:{label:'Absent',cls:'absent'},
   alone:{label:'Seul',cls:'alone'}, time:{label:'Impératif',cls:'time'}, missing:{label:'Non renseigné',cls:'missing'}
 };
-const REVIEW_DEFAULT = [
-  {date:'2020-07-10',reason:'notation historique ambiguë',raw:'I / S / A / E'},
-  {date:'2021-06-10',reason:'code duo chevauche un groupe ≥3',raw:'SE+A+EA'},
-  {date:'2022-07-07',reason:'code duo chevauche un groupe ≥3',raw:'EA'},
-  {date:'2021-10/12',reason:'écart de compteur historique',raw:'Groupe Aurélien/Stéphane/Étienne/Ludo : +1 Ludo sans saisie journalière identifiable'}
-];
+
 
 let authUser = null;
 let profileId = null;
+let linkedProfileId = null;
 let profiles = new Map();
 let availability = new Map();
 let legacyStatus = new Map();
 let compatibilities = new Map();
 let plans = new Map();
 let tripDays = new Map();
-let reviewItems = REVIEW_DEFAULT;
+let preferences = new Map();
+let calendarConfig = {exceptions:[]};
 let unsubscribers = [];
 let installPrompt = null;
 let initializedSnapshots = new Set();
@@ -72,14 +76,23 @@ const appTodayISO = () => {
 };
 const todayISO = () => appTodayISO();
 const isWeekend = d => d.getDay()===0 || d.getDay()===6;
+function easterSunday(year){
+  const a=year%19,b=Math.floor(year/100),c=year%100,d=Math.floor(b/4),e=b%4,f=Math.floor((b+8)/25),g=Math.floor((b-f+1)/3),h=(19*a+b-d-g+15)%30,i=Math.floor(c/4),k=c%4,l=(32+2*e+2*i-h-k)%7,m=Math.floor((a+11*h+22*l)/451),month=Math.floor((h+l-7*m+114)/31),day=((h+l-7*m+114)%31)+1;
+  return new Date(year,month-1,day,12,0,0);
+}
+function juraHolidaySet(year){
+  const e=easterSunday(year), dates=[`${year}-01-01`,`${year}-01-02`,`${year}-05-01`,`${year}-06-23`,`${year}-08-01`,`${year}-08-15`,`${year}-11-01`,`${year}-12-25`];
+  [-2,1,39,50,60].forEach(n=>dates.push(iso(addDays(e,n))));
+  return new Set(dates);
+}
+function calendarException(date){ return (calendarConfig?.exceptions||[]).find(x=>x.date===date)||null; }
+function isWorkingDayISO(ds){
+  const ex=calendarException(ds); if(ex?.type==='on')return true; if(ex?.type==='off')return false;
+  const d=fromISO(ds); if(isWeekend(d))return false; return !juraHolidaySet(d.getFullYear()).has(ds);
+}
 const nextCarpoolISO = () => {
-  const n=appNowParts();
-  let d=fromISO(appTodayISO());
-  // Jusqu'à 08:59 inclus : le covoiturage courant reste celui d'aujourd'hui.
-  // À partir de 09:00 : on passe au prochain jour ouvré.
-  if(n.hour>=9) d=addDays(d,1);
-  while(isWeekend(d)) d=addDays(d,1);
-  return iso(d);
+  const n=appNowParts(); let d=fromISO(appTodayISO()); if(n.hour>=9)d=addDays(d,1);
+  while(!isWorkingDayISO(iso(d)))d=addDays(d,1); return iso(d);
 };
 const isPastDate = ds => ds < todayISO();
 const fmtDate = (s, opts={weekday:'long',day:'numeric',month:'long'}) => fromISO(s).toLocaleDateString('fr-FR',opts);
@@ -136,9 +149,10 @@ function launchLinkedApp(){
   if(appUiInitialized) return;
   appUiInitialized=true;
   showApp();
+  linkedProfileId = linkedProfileId || profileId;
   $('identityName').textContent=label(profileId);
-  if(profileId==='igor') $('adminNav').classList.remove('hidden');
   initStaticUI();
+  initSettingsUI();
   subscribeSharedData();
 }
 
@@ -193,7 +207,7 @@ async function associateInviteToken(invite){
   await setDoc(doc(db,'deviceLinks',authUser.uid),{
     profileId:pid, inviteToken:invite, createdAt:serverTimestamp(), userAgent:navigator.userAgent.slice(0,300)
   });
-  profileId=pid;
+  profileId=pid; linkedProfileId=pid;
   return pid;
 }
 
@@ -224,7 +238,7 @@ async function resolveDeviceIdentity(){
   const params=new URLSearchParams(location.search);
   const invite=params.get('invite');
   if(linkSnap.exists()){
-    profileId=linkSnap.data().profileId;
+    profileId=linkSnap.data().profileId; linkedProfileId=profileId;
     if(invite) cleanInviteParam();
     return;
   }
@@ -248,25 +262,39 @@ function friendlyError(err){
   return err?.message||String(err);
 }
 
+function activePage(id){ return $(id)?.classList.contains('active'); }
+function refreshForData(name){
+  if(!profileId || $('appShell').style.display==='none')return;
+  if(name==='profiles'){ $('identityName').textContent=label(profileId); renderSettings(); return; }
+  if(name==='availability'){ if(activePage('tomorrow'))renderTomorrow(); if(activePage('planning'))renderPlanning(); if(activePage('groups'))renderGroups(); if(activePage('history'))renderSummary(); return; }
+  if(name==='legacyStatus'){ if(activePage('history'))renderSummary(); return; }
+  if(name==='compatibilities'){ if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups'))renderGroups(); return; }
+  if(name==='plans'){ if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups'))renderGroups(); return; }
+  if(name==='tripDays'){ if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups'))renderGroups(); if(activePage('history')){renderSummary();renderHistory();} return; }
+  if(name==='preferences'){ applyTheme(); renderSettings(); return; }
+  if(name==='calendar'){ if(activePage('tomorrow'))renderTomorrow(); if(activePage('planning'))renderPlanning(); if(activePage('groups'))renderGroups(); if(activePage('admin'))renderAdmin(); }
+}
 function subscribeSharedData(){
   setLoading('Chargement des données…','Synchronisation de l’historique et des disponibilités.');
+  let initialRendered=false;
+  const completeInitial=()=>{
+    if(initializedSnapshots.size>=8 && !initialRendered){ initialRendered=true; hideLoading(); renderAll(); }
+  };
   const watch=(name,ref,handler)=>{
     const off=onSnapshot(ref,snap=>{
-      handler(snap); initializedSnapshots.add(name);
-      if(initializedSnapshots.size>=6){ hideLoading(); renderAll(); }
-    },err=>{console.error(name,err);$('syncDot').classList.add('off');$('syncText').textContent='Erreur de synchronisation';});
+      handler(snap); initializedSnapshots.add(name); completeInitial(); if(initialRendered)refreshForData(name);
+    },err=>{console.error(name,err);showConnectionAlert('Erreur de synchronisation');});
     unsubscribers.push(off);
   };
-  watch('profiles',collection(db,'profiles'),snap=>{ profiles=new Map(snap.docs.map(d=>[d.id,d.data()])); $('identityName').textContent=label(profileId); });
-  watch('availability',collection(db,'availability'),snap=>{ availability=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
-  watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
-  watch('compatibilities',collection(db,'compatibilities'),snap=>{ compatibilities=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
-  watch('plans',collection(db,'plans'),snap=>{ plans=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
-  watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); renderAll(); });
-  loadReviewConfig();
-}
-async function loadReviewConfig(){
-  try{const s=await getDoc(doc(db,'config','app')); if(s.exists()&&Array.isArray(s.data().review)) reviewItems=s.data().review;}catch(e){}
+  watch('profiles',collection(db,'profiles'),snap=>{ profiles=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  watch('availability',collection(db,'availability'),snap=>{ availability=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  watch('compatibilities',collection(db,'compatibilities'),snap=>{ compatibilities=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  watch('plans',collection(db,'plans'),snap=>{ plans=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  watch('preferences',collection(db,'preferences'),snap=>{ preferences=new Map(snap.docs.map(d=>[d.id,d.data()])); });
+  const offCalendar=onSnapshot(doc(db,'config','calendar'),snap=>{ calendarConfig=snap.exists()?snap.data():{exceptions:[]}; initializedSnapshots.add('calendar'); completeInitial(); if(initialRendered)refreshForData('calendar'); },err=>{console.error('calendar',err); initializedSnapshots.add('calendar'); completeInitial();});
+  unsubscribers.push(offCalendar);
 }
 
 function initStaticUI(){
@@ -276,81 +304,70 @@ function initStaticUI(){
   qsa('.status-btn').forEach(b=>b.addEventListener('click',()=>handleTomorrowStatus(b.dataset.status)));
   $('saveTime').addEventListener('click',()=>setAvailability(nextCarpoolISO(),'time',$('timeLimit').value));
   $('rangeStatus').addEventListener('change',()=>{$('rangeTimeField').style.display=$('rangeStatus').value==='time'?'flex':'none';});
-  $('applyRange').addEventListener('click',applyRange);
-  $('groupDate').addEventListener('change',renderGroups);
-  $('addGroup').addEventListener('click',addSelectedGroup);
-  $('validateTrips').addEventListener('click',validateTrips);
-  $('summaryPeriod').addEventListener('change',renderSummary);
-  $('historyFilter').addEventListener('input',renderHistory);
-  $('exportHistory').addEventListener('click',exportHistoryCSV);
-  $('installBtn').addEventListener('click',installPwa);
-  if($('legacyImportFile')) $('legacyImportFile').addEventListener('change',()=>{
-    const file=$('legacyImportFile').files?.[0];
-    const btn=$('legacyImportButton');
-    if(btn) btn.disabled=!file;
-    const status=$('legacyImportStatus');
-    if(status) status.textContent=file?`Fichier sélectionné : ${file.name}`:'Aucun import lancé.';
-  });
-  if($('legacyImportButton')) $('legacyImportButton').addEventListener('click',importLegacyStatusSelected);
+  $('applyRange').addEventListener('click',applyRange); $('groupDate').addEventListener('change',renderGroups); $('addGroup').addEventListener('click',addSelectedGroup); $('validateTrips').addEventListener('click',validateTrips);
+  $('summaryPeriod').addEventListener('change',()=>{renderSummary();renderHistory();}); $('historyFilter').addEventListener('input',renderHistory); $('exportHistory').addEventListener('click',exportHistoryCSV); $('installBtn').addEventListener('click',installPwa);
+  $('menuBtn').addEventListener('click',openSettingsMenu); $('closeMenuBtn').addEventListener('click',closeSettingsMenu); $('menuBackdrop').addEventListener('click',closeSettingsMenu); $('openAdminBtn').addEventListener('click',()=>{closeSettingsMenu();openPage('admin');});
+  $('aboutToggle').addEventListener('click',()=>{const details=$('aboutDetails');const open=details.style.display!=='none';details.style.display=open?'none':'block';$('aboutToggle').classList.toggle('open',!open);});
+  $('donateBtn').addEventListener('click',()=>{const el=$('coffeeThanks');if(el){el.style.display='block';setTimeout(()=>{el.style.display='none';},3500);}});
+  $('notificationsToggle').addEventListener('change',toggleNotifications); $('localNotificationTestBtn')?.addEventListener('click',testLocalNotification); $('copyFcmTokenBtn')?.addEventListener('click',copyFcmToken); qsa('[data-theme]').forEach(b=>b.addEventListener('click',()=>saveTheme(b.dataset.theme)));
+  $('addCalendarException').addEventListener('click',addCalendarException); $('exportTestSnapshot').addEventListener('click',exportTestSnapshot); $('importTestSnapshot').addEventListener('click',importTestSnapshot); $('adminBroadcastTestBtn')?.addEventListener('click',queueAdminBroadcastTest);
+  $('testUserSwitch').addEventListener('change',()=>switchTestUser($('testUserSwitch').value));
   setInterval(()=>{ if($('tomorrow')?.classList.contains('active')) renderTomorrow(); },60000);
   window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installBtn').style.display='inline-block';});
   if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(console.warn);
+  initMessaging().catch(console.warn);
 }
 function fillTimeSelect(sel,value='16:15'){
   sel.innerHTML='';
-  for(let h=14;h<=20;h++) for(const m of [0,15,30,45]){
-    if(h===20&&m>0)continue;
+  const start=15*60+15, end=18*60;
+  for(let total=start;total<=end;total+=15){
+    const h=Math.floor(total/60),m=total%60;
     const v=`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
     const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);
   }
-  sel.value=value;
+  sel.value=[...sel.options].some(o=>o.value===value)?value:'16:15';
 }
 function openPage(page){
-  qsa('.page').forEach(x=>x.classList.toggle('active',x.id===page));
-  qsa('#nav button[data-page]').forEach(x=>x.classList.toggle('active',x.dataset.page===page));
-  if(page==='groups')renderGroups(); if(page==='summary')renderSummary(); if(page==='history')renderHistory(); if(page==='admin')renderAdmin();
+  qsa('.page').forEach(x=>x.classList.toggle('active',x.id===page)); qsa('#nav button[data-page]').forEach(x=>x.classList.toggle('active',x.dataset.page===page));
+  if(page==='groups')renderGroups(); if(page==='history'){renderSummary();renderHistory();} if(page==='admin')renderAdmin();
 }
-
 async function handleTomorrowStatus(st){
-  if(st==='time'){
-    const v=getAvail(nextCarpoolISO(),profileId); $('timeLimit').value=v?.time||'16:15'; $('timeBox').style.display='flex';
-    return;
-  }
-  $('timeBox').style.display='none'; await setAvailability(nextCarpoolISO(),st,null);
+  if(st==='time'){const v=getAvail(nextCarpoolISO(),profileId);$('timeLimit').value=v?.time||'16:15';$('timeBox').style.display='flex';return;}
+  $('timeBox').style.display='none';await setAvailability(nextCarpoolISO(),st,null);
 }
 async function setAvailability(date,status,time=null){
+  const key=availKey(date,profileId), previous=availability.get(key);
+  const optimistic={date,profileId,status,time:status==='time'?time:null,updatedByUid:authUser.uid};
+  availability.set(key,optimistic);
+  if(activePage('tomorrow'))renderTomorrow(); if(activePage('planning'))renderPlanning(); if(activePage('groups'))renderGroups(); if(activePage('history'))renderSummary();
+  toast(`${fmtDate(date,{weekday:'short',day:'numeric',month:'short'})} : ${statusMeta(optimistic).label} · enregistrement…`);
   try{
-    await setDoc(doc(db,'availability',availKey(date,profileId)),{
-      date,profileId,status,time:status==='time'?time:null,updatedAt:serverTimestamp(),updatedByUid:authUser.uid
-    });
-    toast(`${fmtDate(date,{weekday:'short',day:'numeric',month:'short'})} : ${statusMeta({status,time}).label}`);
-  }catch(e){alert(friendlyError(e));}
+    await setDoc(doc(db,'availability',key),{...optimistic,updatedAt:serverTimestamp()});
+    toast('✓ Enregistré');
+  }catch(e){
+    if(previous)availability.set(key,previous);else availability.delete(key);
+    refreshForData('availability'); alert(friendlyError(e));
+  }
 }
 async function clearAvailability(date){
-  try{await deleteDoc(doc(db,'availability',availKey(date,profileId)));toast('Saisie supprimée.');}catch(e){alert(friendlyError(e));}
+  const key=availKey(date,profileId),previous=availability.get(key); availability.delete(key); refreshForData('availability'); toast('Saisie supprimée · enregistrement…');
+  try{await deleteDoc(doc(db,'availability',key));toast('✓ Enregistré');}catch(e){if(previous)availability.set(key,previous);refreshForData('availability');alert(friendlyError(e));}
 }
 
 function renderAll(){
   if(!profileId||$('appShell').style.display==='none')return;
-  renderTomorrow(); renderPlanning(); renderGroups(); renderSummary(); renderHistory();
+  $('identityName').textContent=label(profileId); renderTomorrow(); renderPlanning(); renderGroups(); renderSummary(); renderHistory(); renderSettings();
+  if($('admin')?.classList.contains('active'))renderAdmin();
 }
 function renderTomorrow(){
-  const ds=nextCarpoolISO();
-  $('tomorrowTitle').textContent=`Prochain — ${fmtDate(ds)}`;
-  $('tomorrowSubtitle').textContent='Indique ton statut ; tu peux le modifier à tout moment.';
-  const mine=getAvail(ds,profileId);
+  const ds=nextCarpoolISO(); $('tomorrowTitle').textContent=fmtDate(ds); $('tomorrowSubtitle').textContent='Prochain jour travaillé';
+  const mine=getAvail(ds,profileId),mineMeta=statusMeta(mine);
   qsa('.status-btn').forEach(b=>b.classList.toggle('selected',mine?.status===b.dataset.status));
   $('timeBox').style.display=mine?.status==='time'?'flex':'none'; if(mine?.status==='time')$('timeLimit').value=mine.time||'16:15';
-  $('tomorrowSaved').textContent=mine?`Enregistré : ${statusMeta(mine).label}`:'Pas encore renseigné.';
-  const box=$('collectiveTomorrow'); box.innerHTML=''; let answered=0;
-  PEOPLE.forEach(p=>{
-    const v=getAvail(ds,p); if(v)answered++; const m=statusMeta(v);
-    const row=document.createElement('div');row.className='person-row';
-    row.innerHTML=`<div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong></div><span class="pill ${m.cls}">${m.label}</span>`;
-    box.appendChild(row);
-  });
-  const count=document.createElement('div');count.className='footer-note';count.textContent=`${answered}/5 réponses reçues`;box.appendChild(count);
-  renderTimeCompatibility(ds,mine);
+  const mineSummary=$('myTomorrowSummary'); if(mineSummary)mineSummary.textContent='';
+  const box=$('collectiveTomorrow');box.innerHTML='';let answered=0;
+  PEOPLE.forEach(p=>{const v=getAvail(ds,p);if(v)answered++;const m=statusMeta(v);const row=document.createElement('div');row.className='person-row compact-person';row.innerHTML=`<div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong></div><span class="pill ${m.cls}">${m.label}</span>`;box.appendChild(row);});
+  const count=document.createElement('div');count.className='responses-count';count.textContent=`${answered}/5 renseignés`;box.appendChild(count); renderTimeCompatibility(ds,mine); renderQuickProposal(ds);
 }
 function renderTimeCompatibility(ds,mine){
   const box=$('timeCompatibilityBox');
@@ -369,17 +386,15 @@ function renderTimeCompatibility(ds,mine){
   box.querySelectorAll('.compat-btn').forEach(b=>b.addEventListener('click',()=>saveCompatibility(ds,b.dataset.owner,b.dataset.answer)));
 }
 async function saveCompatibility(date,owner,response){
-  const ownerV=getAvail(date,owner); if(ownerV?.status!=='time')return;
-  try{
-    await setDoc(doc(db,'compatibilities',compatKey(date,owner,profileId)),{
-      date,ownerId:owner,responderId:profileId,response,ownerTime:ownerV.time,updatedAt:serverTimestamp()
-    });
-    toast(response==='yes'?'Compatibilité validée.':'Incompatibilité enregistrée.');
-  }catch(e){alert(friendlyError(e));}
+  const ownerV=getAvail(date,owner); if(ownerV?.status!=='time')return; const key=compatKey(date,owner,profileId),previous=compatibilities.get(key);
+  const optimistic={date,ownerId:owner,responderId:profileId,response,ownerTime:ownerV.time}; compatibilities.set(key,optimistic);
+  if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups'))renderGroups(); toast(response==='yes'?'Compatibilité validée · enregistrement…':'Incompatibilité enregistrée · enregistrement…');
+  try{await setDoc(doc(db,'compatibilities',key),{...optimistic,updatedAt:serverTimestamp()});toast('✓ Enregistré');}
+  catch(e){if(previous)compatibilities.set(key,previous);else compatibilities.delete(key);refreshForData('compatibilities');alert(friendlyError(e));}
 }
 
 function workingDays(start,count){
-  const out=[];let d=fromISO(start);while(out.length<count){if(d.getDay()!==0&&d.getDay()!==6)out.push(iso(d));d=addDays(d,1);}return out;
+  const out=[];let d=fromISO(start);while(out.length<count){const ds=iso(d);if(isWorkingDayISO(ds))out.push(ds);d=addDays(d,1);}return out;
 }
 function renderPlanning(){
   const list=$('plannerList'); if(!list)return; list.innerHTML='';
@@ -404,7 +419,7 @@ async function applyRange(){
   const a=$('rangeStart').value,b=$('rangeEnd').value,st=$('rangeStatus').value,tm=$('rangeTime').value;
   if(!a||!b||a>b){alert('Vérifie les dates.');return;}
   const jobs=[];let d=fromISO(a),end=fromISO(b),n=0;
-  while(d<=end){if(d.getDay()!==0&&d.getDay()!==6){const ds=iso(d);jobs.push(setDoc(doc(db,'availability',availKey(ds,profileId)),{date:ds,profileId,status:st,time:st==='time'?tm:null,updatedAt:serverTimestamp(),updatedByUid:authUser.uid}));n++;}d=addDays(d,1);}
+  while(d<=end){const ds=iso(d);if(isWorkingDayISO(ds)){jobs.push(setDoc(doc(db,'availability',availKey(ds,profileId)),{date:ds,profileId,status:st,time:st==='time'?tm:null,updatedAt:serverTimestamp(),updatedByUid:authUser.uid}));n++;}d=addDays(d,1);}
   try{await Promise.all(jobs);toast(`${n} jour(s) renseigné(s).`);}catch(e){alert(friendlyError(e));}
 }
 
@@ -459,7 +474,7 @@ function renderGroupCompatibilityMessage(ds){
   else msg.innerHTML='';
 }
 function flattenTrips(){
-  const out=[];tripDays.forEach((day,date)=>{(day.groups||[]).forEach((g,i)=>out.push({date,id:g.id||`${date}-${i}`,participants:g.members||g.participants||[],driver:g.driver||g.driverId,source:g.source||day.source||'v3'}));});return out;
+  const out=[];tripDays.forEach((day,date)=>{(day.groups||[]).forEach((g,i)=>out.push({date,id:g.id||`${date}-${i}`,participants:g.members||g.participants||[],driver:g.driver||g.driverId,source:g.source||day.source||'app'}));});return out;
 }
 function driverSuggestion(ds,members){
   const target=canonical(members).join('|'); const counts=Object.fromEntries(members.map(p=>[p,0]));
@@ -476,7 +491,11 @@ async function addSelectedGroup(){
   await savePlan(ds,groups);toast('Groupe ajouté.');
 }
 async function savePlan(date,groups){
-  await setDoc(doc(db,'plans',date),{date,groups:groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver})),updatedAt:serverTimestamp(),updatedBy:profileId});
+  const previous=plans.get(date); const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver}));
+  plans.set(date,{date,groups:normalized,updatedBy:profileId});
+  if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups'))renderGroups();
+  try{await setDoc(doc(db,'plans',date),{date,groups:normalized,updatedAt:serverTimestamp(),updatedBy:profileId});}
+  catch(e){if(previous)plans.set(date,previous);else plans.delete(date);refreshForData('plans');throw e;}
 }
 function renderDraftGroups(ds){
   const box=$('draftGroups'),gs=currentPlan(ds);box.innerHTML='';
@@ -497,83 +516,49 @@ function groupsHaveOverlap(groups){
   const seen=new Set();for(const g of groups){for(const p of g.members){if(seen.has(p))return p;seen.add(p);}}return null;
 }
 async function validateTrips(){
-  const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;
-  const overlap=groupsHaveOverlap(groups);if(overlap){alert(`${label(overlap)} apparaît dans plusieurs groupes. Corrige avant de valider.`);return;}
-  for(const g of groups){if(g.members.length<2||!g.members.includes(g.driver)){alert('Un groupe est invalide.');return;}if(!isPastDate(ds)&&explicitIncompatibilities(ds,g.members).length){alert('Un groupe contient une incompatibilité horaire.');return;}}
-  const existing=tripDays.get(ds);
-  if(existing?.groups?.length && !confirm(`Des trajets sont déjà validés pour ${fmtDate(ds)}. La validation remplacera entièrement les groupes existants pour cette date. Continuer ?`))return;
-  const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver,source:'v3'}));
-  try{
-    await setDoc(doc(db,'tripDays',ds),{date:ds,groups:normalized,source:'v3',updatedAt:serverTimestamp(),updatedBy:profileId});
-    await setDoc(doc(db,'plans',ds),{date:ds,groups:normalized,validatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:profileId});
-    $('validationMessage').textContent=`${normalized.length} trajet(s) validé(s) pour ${fmtDate(ds)}.`;toast('Trajets validés.');
-  }catch(e){alert(friendlyError(e));}
+  const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;try{await validateGroupsForDate(ds,groups);$('validationMessage').textContent=`${groups.length} trajet(s) validé(s) pour ${fmtDate(ds)}.`;}catch(e){alert(friendlyError(e));}
 }
 function renderValidatedInfo(ds){
   const groups=tripGroupsForDate(ds),box=$('validatedTodayInfo');
   if(!groups.length){box.innerHTML='';return;}
   box.innerHTML=`<div class="notice oknotice"><strong>${groups.length} trajet(s) déjà validé(s)</strong><div class="small">Valider de nouveau remplacera les groupes de cette date, ce qui évite les doublons.</div></div>`;
 }
-async function loadValidatedIntoPlan(date){
+function loadValidatedIntoPlan(date){
   const groups=tripGroupsForDate(date).map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members||g.participants||[]),driver:g.driver||g.driverId}));
-  if(groups.length)await savePlan(date,groups);
-  $('groupDate').value=date;openPage('groups');renderGroups();
+  $('groupDate').value=date; if(groups.length)savePlan(date,groups).catch(e=>alert(friendlyError(e)));
+  openPage('groups'); renderGroups(); toast('Trajet chargé pour modification.');
 }
 async function deleteHistoryGroup(date,id){
   const day=tripDays.get(date);if(!day)return;const groups=(day.groups||[]).filter(g=>(g.id||'')!==id);
   if(!confirm(`Supprimer ce trajet du ${fmtDate(date)} ?`))return;
-  try{if(groups.length)await setDoc(doc(db,'tripDays',date),{...day,groups,updatedAt:serverTimestamp(),updatedBy:profileId});else await deleteDoc(doc(db,'tripDays',date));toast('Trajet supprimé.');}catch(e){alert(friendlyError(e));}
+  const previous=day;
+  if(groups.length)tripDays.set(date,{...day,groups,updatedBy:profileId});else tripDays.delete(date);
+  if(activePage('tomorrow'))renderTomorrow();if(activePage('groups')){renderGroups();renderValidatedInfo(date);}if(activePage('history')){renderSummary();renderHistory();}
+  toast('Trajet supprimé · enregistrement…');
+  try{
+    if(groups.length)await setDoc(doc(db,'tripDays',date),{...day,groups,updatedAt:serverTimestamp(),updatedBy:profileId});else await deleteDoc(doc(db,'tripDays',date));
+    toast('✓ Trajet supprimé');
+  }catch(e){tripDays.set(date,previous);refreshForData('tripDays');alert(friendlyError(e));}
 }
 
 function periodMatch(date,period){if(period==='month')return date.startsWith(currentYM());if(period==='year')return date.startsWith(`${nowYear()}-`);return true;}
 function renderSummary(){
-  if(!$('summaryUser'))return;const period=$('summaryPeriod').value;$('summaryUser').textContent=label(profileId);
-  let driver=0,passenger=0;const carpoolDates=new Set();
-  flattenTrips().filter(t=>periodMatch(t.date,period)).forEach(t=>{if(t.participants.includes(profileId)){carpoolDates.add(t.date);if(t.driver===profileId)driver++;else passenger++;}});
-
-  const current=[...availability.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period));
-  const currentByDate=new Map(current.map(v=>[v.date,v]));
-  let present=0,alone=0,absent=0,time=0;
-  current.forEach(v=>{if(v.status==='present')present++;else if(v.status==='time'){present++;time++;}else if(v.status==='alone')alone++;else if(v.status==='absent')absent++;});
-
+  if(!$('summaryUser'))return; const period=$('summaryPeriod').value; $('summaryUser').textContent=label(profileId);
+  let driver=0,passenger=0;const carpoolDates=new Set(); flattenTrips().filter(t=>periodMatch(t.date,period)).forEach(t=>{if(t.participants.includes(profileId)){carpoolDates.add(t.date);if(t.driver===profileId)driver++;else passenger++;}});
+  const current=[...availability.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period)); const currentByDate=new Map(current.map(v=>[v.date,v]));
   const legacy=[...legacyStatus.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period)&&!currentByDate.has(v.date)&&!carpoolDates.has(v.date));
-  let legacyAbsent=0,legacyAlone=0,legacyAmbiguous=0;
-  legacy.forEach(v=>{if(v.legacyStatus==='absent')legacyAbsent++;else if(v.legacyStatus==='alone')legacyAlone++;else if(v.legacyStatus==='absent_or_alone')legacyAmbiguous++;});
-
-  const trackedDates=new Set(carpoolDates);
-  current.forEach(v=>trackedDates.add(v.date)); legacy.forEach(v=>trackedDates.add(v.date));
-  const exactPresenceDates=new Set(carpoolDates);
-  current.forEach(v=>{if(v.status==='present'||v.status==='time'||v.status==='alone')exactPresenceDates.add(v.date);});
-  legacy.forEach(v=>{if(v.legacyStatus==='alone')exactPresenceDates.add(v.date);});
-
-  $('kDriver').textContent=driver;$('kPassenger').textContent=passenger;$('kSaved').textContent=passenger;$('kCarpooled').textContent=carpoolDates.size;$('kPresent').textContent=trackedDates.size;
-  $('statusStats').innerHTML=`
-    <div class="person-row"><span class="grow">Présent renseigné (nouvelle appli)</span><strong>${present}</strong></div>
-    <div class="person-row"><span class="grow">Seul (nouvelle appli)</span><strong>${alone}</strong></div>
-    <div class="person-row"><span class="grow">Absent (nouvelle appli)</span><strong>${absent}</strong></div>
-    <div class="person-row"><span class="grow">Avec impératif horaire</span><strong>${time}</strong></div>
-    <div class="person-row"><span class="grow">Absent historique certain</span><strong>${legacyAbsent}</strong></div>
-    <div class="person-row"><span class="grow">Seul historique certain</span><strong>${legacyAlone}</strong></div>
-    <div class="person-row"><span class="grow">Absent ou seul (ancien Excel)</span><strong>${legacyAmbiguous}</strong></div>`;
-
-  let rateText='';
-  if(legacyAmbiguous===0){
-    const rate=exactPresenceDates.size?Math.round((carpoolDates.size/exactPresenceDates.size)*100):0;
-    rateText=`<p>Taux de covoiturage sur les jours de présence identifiables : <strong>${rate}%</strong>.</p>`;
-  }else{
-    rateText=`<p>Le taux historique exact n’est pas affiché : <strong>${legacyAmbiguous} jour(s)</strong> de l’ancien Excel sont codés « absent ou seul » et ne permettent pas de distinguer les deux situations.</p>`;
-  }
-  $('summaryNote').innerHTML=`<p><strong>${passenger} jour(s)</strong> où ta voiture n’a pas été utilisée grâce au covoiturage.</p>${rateText}<p><strong>${trackedDates.size} jour(s)</strong> disposent d’une information exploitable sur cette période (trajet ou statut). Les statuts historiques détaillés sont récupérés à partir de juin 2022 ; les trajets, eux, remontent à 2020.</p>`;
+  const trackedDates=new Set(carpoolDates); current.forEach(v=>trackedDates.add(v.date)); legacy.forEach(v=>trackedDates.add(v.date));
+  $('kDriver').textContent=driver; $('kPassenger').textContent=passenger; $('kCarpooled').textContent=carpoolDates.size; $('kTracked').textContent=trackedDates.size;
+}
+function buildHistoryCounterSnapshots(trips){
+  const states=new Map(),snapshots=new Map(); const ordered=[...trips].sort((a,b)=>a.date.localeCompare(b.date)||String(a.id).localeCompare(String(b.id)));
+  for(const t of ordered){const members=canonical(t.participants),key=members.join('|');let state=states.get(key);if(!state){state=Object.fromEntries(members.map(p=>[p,0]));states.set(key,state);}if(t.driver in state)state[t.driver]++;snapshots.set(`${t.date}|${t.id}`,{...state});}return snapshots;
 }
 function renderHistory(){
-  if(!$('historyList'))return;const all=flattenTrips().sort((a,b)=>b.date.localeCompare(a.date));$('historyCount').textContent=all.length;
-  if(reviewItems?.length){$('reviewBox').style.display='block';$('reviewList').innerHTML=reviewItems.map(x=>`<div>• ${x.date} — ${x.raw||x.reason} <span class="muted">(${x.reason})</span></div>`).join('');}else $('reviewBox').style.display='none';
-  const q=($('historyFilter').value||'').trim().toLowerCase();let ts=all;
-  if(q)ts=ts.filter(t=>`${t.date} ${groupCode(t.participants)} ${canonical(t.participants).map(label).join(' ')} ${label(t.driver)}`.toLowerCase().includes(q));
-  ts=ts.slice(0,300);
-  $('historyList').innerHTML=ts.map(t=>`<div class="hist-row"><div>${t.date}</div><div><strong>${groupCode(t.participants)}</strong> · ${canonical(t.participants).map(label).join(', ')}</div><div class="driver">🚗 ${label(t.driver)}</div><div class="hist-actions"><button class="btn secondary smallbtn edit-trip" data-date="${t.date}">Modifier</button><button class="btn danger smallbtn delete-trip" data-date="${t.date}" data-id="${t.id}">Suppr.</button></div></div>`).join('')||'<div class="empty">Aucun résultat.</div>';
-  $('historyList').querySelectorAll('.edit-trip').forEach(b=>b.addEventListener('click',()=>loadValidatedIntoPlan(b.dataset.date)));
-  $('historyList').querySelectorAll('.delete-trip').forEach(b=>b.addEventListener('click',()=>deleteHistoryGroup(b.dataset.date,b.dataset.id)));
+  if(!$('historyList'))return; const raw=flattenTrips(),counterSnapshots=buildHistoryCounterSnapshots(raw),all=[...raw].sort((a,b)=>b.date.localeCompare(a.date)); $('historyCount').textContent=all.length; renderQualityChecks(all);
+  const q=($('historyFilter').value||'').trim().toLowerCase();let ts=all; if(q)ts=ts.filter(t=>`${t.date} ${groupCode(t.participants)} ${canonical(t.participants).map(label).join(' ')} ${label(t.driver)}`.toLowerCase().includes(q)); ts=ts.slice(0,300);
+  $('historyList').innerHTML=ts.map(t=>{const counts=counterSnapshots.get(`${t.date}|${t.id}`)||{};return `<div class="hist-row"><div>${t.date}</div><div><strong>${groupCode(t.participants)}</strong> · ${canonical(t.participants).map(label).join(', ')}</div><div class="driver">🚗 ${label(t.driver)}</div><div class="hist-actions"><button class="btn secondary smallbtn edit-trip" data-date="${t.date}">Modifier</button><button class="btn danger smallbtn delete-trip" data-date="${t.date}" data-id="${t.id}">Suppr.</button></div><div class="hist-counter">Compteurs après ce trajet : ${canonical(t.participants).map(p=>`${label(p)} <strong>${counts[p]||0}</strong>`).join(' · ')}</div></div>`;}).join('')||'<div class="empty">Aucun résultat.</div>';
+  $('historyList').querySelectorAll('.edit-trip').forEach(b=>b.addEventListener('click',()=>loadValidatedIntoPlan(b.dataset.date))); $('historyList').querySelectorAll('.delete-trip').forEach(b=>b.addEventListener('click',()=>deleteHistoryGroup(b.dataset.date,b.dataset.id)));
 }
 function exportHistoryCSV(){
   const rows=[['Date','Groupe','Participants','Conducteur','Source']];
@@ -582,60 +567,33 @@ function exportHistoryCSV(){
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`Historique_Covoiturage_${iso(new Date())}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Historique exporté.');
 }
 
-async function renderAdmin(){
-  if(profileId!=='igor')return;
-  $('inviteList').innerHTML='<div class="muted">Chargement…</div>';$('deviceList').innerHTML='<div class="muted">Chargement…</div>';
+async function queueAdminBroadcastTest(){
+  if(linkedProfileId!=='igor'){alert('Action réservée à Igor.');return;}
+  if(!confirm('Envoyer une notification de test à tous les appareils ayant activé les notifications ?'))return;
+  const btn=$('adminBroadcastTestBtn'),state=$('adminBroadcastState');
+  if(btn){btn.disabled=true;btn.textContent='Envoi demandé…';}
+  if(state)state.textContent='Mise en file d’attente…';
   try{
-    const [invSnap,devSnap]=await Promise.all([getDocs(collection(db,'invitations')),getDocs(collection(db,'deviceLinks'))]);
-    const invs=invSnap.docs.map(d=>({token:d.id,...d.data()}));
-    $('inviteList').innerHTML='';
-    PEOPLE.forEach(pid=>{
-      const active=invs.filter(x=>x.profileId===pid&&x.active===true).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0))[0];
-      const div=document.createElement('div');div.className='admin-item';
-      if(active){const url=`${baseAppUrl()}?invite=${active.token}`;div.innerHTML=`<strong>${label(pid)}</strong><div class="linkbox">${url}</div><div class="row"><button class="btn secondary smallbtn copy-invite" data-url="${url}">Copier le lien</button><button class="btn danger smallbtn regen-invite" data-pid="${pid}">Régénérer</button></div>`;}
-      else div.innerHTML=`<strong>${label(pid)}</strong><div class="small muted">Aucun lien actif.</div><button class="btn secondary smallbtn regen-invite" data-pid="${pid}">Créer un lien</button>`;
-      $('inviteList').appendChild(div);
+    const id=`broadcast_${Date.now()}_${crypto.randomUUID().slice(0,8)}`;
+    await setDoc(doc(db,'notificationRequests',id),{
+      type:'broadcast-test',title:'Covoiturage',body:'Notification de test ✅',status:'pending',createdBy:'igor',createdAt:serverTimestamp()
     });
-    $('inviteList').querySelectorAll('.copy-invite').forEach(b=>b.addEventListener('click',async()=>{await navigator.clipboard.writeText(b.dataset.url);toast('Lien copié.');}));
-    $('inviteList').querySelectorAll('.regen-invite').forEach(b=>b.addEventListener('click',()=>regenerateInvite(b.dataset.pid,invs)));
-    const devices=devSnap.docs.map(d=>({uid:d.id,...d.data()}));$('deviceList').innerHTML='';
-    if(!devices.length)$('deviceList').innerHTML='<div class="empty">Aucun appareil.</div>';
-    devices.sort((a,b)=>label(a.profileId).localeCompare(label(b.profileId),'fr')).forEach(x=>{
-      const div=document.createElement('div');div.className='admin-item';const isCurrent=x.uid===authUser.uid;
-      div.innerHTML=`<div class="row"><strong class="grow">${label(x.profileId)}${isCurrent?' · cet appareil':''}</strong><button class="btn danger smallbtn revoke-device" data-uid="${x.uid}">Révoquer</button></div><div class="small muted">ID : ${x.uid.slice(0,10)}…</div>`;$('deviceList').appendChild(div);
-    });
-    $('deviceList').querySelectorAll('.revoke-device').forEach(b=>b.addEventListener('click',()=>revokeDevice(b.dataset.uid)));
-  }catch(e){$('inviteList').innerHTML=`<div class="notice danger">${friendlyError(e)}</div>`;$('deviceList').innerHTML='';}
-}
-async function importLegacyStatusSelected(){
-  if(profileId!=='igor')return;
-  const input=$('legacyImportFile');
-  const file=input?.files?.[0];
-  if(!file){ alert('Choisis d’abord le fichier JSON à importer.'); return; }
-  try{
-    const payload=JSON.parse(await file.text());
-    const records=Array.isArray(payload)?payload:payload.records;
-    if(!Array.isArray(records)||!records.length) throw new Error('Fichier sans enregistrements.');
-    if(!confirm(`Importer ${records.length} statuts historiques dans la base commune ? Les documents portant le même identifiant seront remplacés.`)) return;
-    const status=$('legacyImportStatus'); if(status)status.textContent='Import en cours…';
-    let done=0;
-    for(let i=0;i<records.length;i+=400){
-      const batch=writeBatch(db);
-      records.slice(i,i+400).forEach(r=>{
-        if(!r.date||!r.profileId||!r.legacyStatus)return;
-        const id=legacyKey(r.date,r.profileId);
-        batch.set(doc(db,'legacyStatus',id),{date:r.date,profileId:r.profileId,legacyStatus:r.legacyStatus,code:r.code??null,source:r.source||'ancien Excel',importedAt:serverTimestamp()});
-      });
-      await batch.commit(); done=Math.min(i+400,records.length); if(status)status.textContent=`${done}/${records.length} importés…`;
-    }
-    if(status)status.textContent=`Import terminé : ${records.length} statuts historiques.`;
-    toast('Statuts historiques importés.');
-  }catch(e){console.error(e);alert(`Import impossible : ${friendlyError(e)}`);}finally{
-    if(input) input.value='';
-    const btn=$('legacyImportButton'); if(btn) btn.disabled=true;
-  }
+    if(state)state.textContent='✓ Demande enregistrée. Envoi à tous les appareils activés dans quelques minutes.';
+    toast('Notification de test demandée.');
+  }catch(e){if(state)state.textContent='Erreur : '+friendlyError(e);alert(friendlyError(e));}
+  finally{if(btn){btn.disabled=false;btn.textContent='🔔 Envoyer à tous';}}
 }
 
+async function renderAdmin(){
+  if(linkedProfileId!=='igor')return; $('inviteList').innerHTML='<div class="muted">Chargement…</div>'; $('deviceList').innerHTML='<div class="muted">Chargement…</div>';
+  try{
+    const [invSnap,devSnap]=await Promise.all([getDocs(collection(db,'invitations')),getDocs(collection(db,'deviceLinks'))]); const invs=invSnap.docs.map(d=>({token:d.id,...d.data()})); $('inviteList').innerHTML='';
+    PEOPLE.forEach(pid=>{const active=invs.filter(x=>x.profileId===pid&&x.active===true).sort((a,b)=>(b.createdAt?.seconds||0)-(a.createdAt?.seconds||0))[0];const div=document.createElement('div');div.className='admin-item';if(active){const url=`${baseAppUrl()}?invite=${active.token}`;div.innerHTML=`<strong>${label(pid)}</strong><div class="linkbox">${url}</div><div class="row"><button class="btn secondary smallbtn copy-invite" data-url="${url}">Copier le lien</button><button class="btn danger smallbtn regen-invite" data-pid="${pid}">Régénérer</button></div>`;}else div.innerHTML=`<strong>${label(pid)}</strong><div class="small muted">Aucun lien actif.</div><button class="btn secondary smallbtn regen-invite" data-pid="${pid}">Créer un lien</button>`;$('inviteList').appendChild(div);});
+    $('inviteList').querySelectorAll('.copy-invite').forEach(b=>b.addEventListener('click',async()=>{await navigator.clipboard.writeText(b.dataset.url);toast('Lien copié.');})); $('inviteList').querySelectorAll('.regen-invite').forEach(b=>b.addEventListener('click',()=>regenerateInvite(b.dataset.pid,invs)));
+    const devices=devSnap.docs.map(d=>({uid:d.id,...d.data()})); $('deviceList').innerHTML=''; if(!devices.length)$('deviceList').innerHTML='<div class="empty">Aucun appareil.</div>'; devices.sort((a,b)=>label(a.profileId).localeCompare(label(b.profileId),'fr')).forEach(x=>{const div=document.createElement('div');div.className='admin-item';const isCurrent=x.uid===authUser.uid;div.innerHTML=`<div class="row"><strong class="grow">${label(x.profileId)}${isCurrent?' · cet appareil':''}</strong><button class="btn danger smallbtn revoke-device" data-uid="${x.uid}">Révoquer</button></div><div class="small muted">ID : ${x.uid.slice(0,10)}…</div>`;$('deviceList').appendChild(div);}); $('deviceList').querySelectorAll('.revoke-device').forEach(b=>b.addEventListener('click',()=>revokeDevice(b.dataset.uid)));
+    renderCalendarExceptions(); $('testImportBlock').style.display=IS_TEST?'flex':'none';
+  }catch(e){$('inviteList').innerHTML=`<div class="notice danger">${friendlyError(e)}</div>`;$('deviceList').innerHTML='';}
+}
 function randomToken(){const b=new Uint8Array(24);crypto.getRandomValues(b);return [...b].map(x=>x.toString(16).padStart(2,'0')).join('');}
 async function regenerateInvite(pid,invs=[]){
   if(!confirm(`Régénérer le lien personnel de ${label(pid)} ? Les appareils déjà associés continueront de fonctionner.`))return;
@@ -649,13 +607,198 @@ async function revokeDevice(uid){
   try{await deleteDoc(doc(db,'deviceLinks',uid));toast('Appareil révoqué.');if(uid===authUser.uid){setTimeout(()=>location.reload(),800)}else renderAdmin();}catch(e){alert(friendlyError(e));}
 }
 
+
+
+function showConnectionAlert(message=''){
+  const el=$('connectionAlert'); if(!el)return; el.style.display=message?'block':'none'; el.textContent=message;
+}
+function openSettingsMenu(){ $('menuBackdrop').style.display='block'; $('sideMenu').classList.add('open'); $('sideMenu').setAttribute('aria-hidden','false'); renderSettings(); }
+function closeSettingsMenu(){ $('menuBackdrop').style.display='none'; $('sideMenu').classList.remove('open'); $('sideMenu').setAttribute('aria-hidden','true'); }
+function pref(pid=profileId){ return preferences.get(pid)||{theme:'auto',notificationsEnabled:false}; }
+function resolvedTheme(theme){ if(theme==='dark'||theme==='light')return theme; return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'; }
+function applyTheme(){ const theme=pref(profileId).theme||'auto'; document.documentElement.dataset.theme=resolvedTheme(theme); qsa('[data-theme]').forEach(b=>b.classList.toggle('active',b.dataset.theme===theme)); }
+async function saveTheme(theme){ const previous=pref(profileId),optimistic={...previous,theme};preferences.set(profileId,optimistic);applyTheme();renderSettings();try{await setDoc(doc(db,'preferences',profileId),{theme,updatedAt:serverTimestamp()},{merge:true});}catch(e){preferences.set(profileId,previous);applyTheme();renderSettings();alert(friendlyError(e));} }
+function initSettingsUI(){
+  $('aboutVersion').textContent=APP_VERSION; $('testBanner').style.display=IS_TEST?'block':'none'; $('testSwitchBlock').style.display=IS_TEST?'block':'none'; $('adminMenuBlock').style.display=linkedProfileId==='igor'?'block':'none';
+  if(IS_TEST){$('testUserSwitch').innerHTML=PEOPLE.map(p=>`<option value="${p}">${label(p)}</option>`).join('');$('testUserSwitch').value=profileId;}
+  renderSettings();
+}
+function renderSettings(){
+  if(!$('menuProfileName'))return; $('menuProfileName').textContent=IS_TEST&&profileId!==linkedProfileId?`${label(linkedProfileId)} · simulation ${label(profileId)}`:label(profileId); $('aboutVersion').textContent=APP_VERSION;
+  $('adminMenuBlock').style.display=linkedProfileId==='igor'?'block':'none'; $('testSwitchBlock').style.display=IS_TEST?'block':'none'; if(IS_TEST)$('testUserSwitch').value=profileId;
+  const theme=pref(profileId).theme||'auto'; qsa('[data-theme]').forEach(b=>b.classList.toggle('active',b.dataset.theme===theme));
+  const np=pref(linkedProfileId); $('notificationsToggle').checked=np.notificationsEnabled===true; $('notificationsToggle').disabled=IS_TEST&&profileId!==linkedProfileId;
+  $('notificationStatus').textContent=(IS_TEST&&profileId!==linkedProfileId)?'Repasse sur Igor pour tester les notifications de cet appareil.':(np.notificationsEnabled?'Rappel activé à 20h.':'Désactivé par défaut.');
+  const nta=$('notificationTestActions'); if(nta)nta.style.display=(IS_TEST&&profileId===linkedProfileId&&np.notificationsEnabled)?'flex':'none';
+  $('simulatedBadge').style.display=IS_TEST&&profileId!==linkedProfileId?'inline-block':'none'; $('simulatedBadge').textContent=IS_TEST&&profileId!==linkedProfileId?`simule ${label(profileId)}`:'';
+}
+function switchTestUser(pid){ if(!IS_TEST||!PEOPLE.includes(pid))return; profileId=pid; $('identityName').textContent=label(pid); applyTheme(); renderAll(); renderSettings(); closeSettingsMenu(); toast(`Simulation : ${label(pid)}`); }
+
+async function initMessaging(){
+  if(!('Notification' in window) || !(await messagingSupported()))return;
+  messaging=getMessaging(app);
+  if('serviceWorker' in navigator){try{messagingSwRegistration=await navigator.serviceWorker.register('./firebase-messaging-sw.js',{scope:'./fcm/'});}catch(e){console.warn('FCM SW',e);}}
+  onMessage(messaging,payload=>toast(payload?.notification?.body||'Nouvelle notification Covoiturage'));
+}
+async function toggleNotifications(){
+  const el=$('notificationsToggle'); const enable=el.checked;
+  if(IS_TEST&&profileId!==linkedProfileId){el.checked=false;alert('Repasse sur Igor pour activer les notifications de cet appareil.');return;}
+  try{
+    if(enable){
+      if(!VAPID_KEY||VAPID_KEY.includes('REMPLACER'))throw new Error('La clé Web Push VAPID n’est pas encore configurée.');
+      if(!messaging)await initMessaging(); const permission=await Notification.requestPermission(); if(permission!=='granted')throw new Error('Autorisation de notification refusée sur cet appareil.');
+      const token=await getToken(messaging,{vapidKey:VAPID_KEY,serviceWorkerRegistration:messagingSwRegistration||undefined}); if(!token)throw new Error('Impossible d’obtenir le jeton de notification.'); currentFcmToken=token;
+      await setDoc(doc(db,'pushTokens',authUser.uid),{profileId:linkedProfileId,token,enabled:true,userAgent:navigator.userAgent.slice(0,300),updatedAt:serverTimestamp()});
+      await setDoc(doc(db,'preferences',linkedProfileId),{notificationsEnabled:true,updatedAt:serverTimestamp()},{merge:true}); toast('Notifications activées.');
+    }else{
+      await setDoc(doc(db,'preferences',linkedProfileId),{notificationsEnabled:false,updatedAt:serverTimestamp()},{merge:true}); await deleteDoc(doc(db,'pushTokens',authUser.uid)).catch(()=>{}); if(messaging)await deleteToken(messaging).catch(()=>{}); currentFcmToken=null; toast('Notifications désactivées.');
+    }
+  }catch(e){console.error(e);el.checked=!enable;alert(e.message||friendlyError(e));}
+}
+
+async function ensureFcmToken(){
+  if(currentFcmToken)return currentFcmToken;
+  if(!VAPID_KEY)throw new Error('Clé VAPID absente.');
+  if(!messaging)await initMessaging();
+  if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
+  currentFcmToken=await getToken(messaging,{vapidKey:VAPID_KEY,serviceWorkerRegistration:messagingSwRegistration||undefined});
+  return currentFcmToken;
+}
+async function testLocalNotification(){
+  try{
+    if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
+    const reg=messagingSwRegistration || await navigator.serviceWorker.ready;
+    await reg.showNotification('Covoiturage · TEST',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
+    toast('Notification de test envoyée sur cet appareil.');
+  }catch(e){alert(e.message||friendlyError(e));}
+}
+async function copyFcmToken(){
+  try{const token=await ensureFcmToken();await navigator.clipboard.writeText(token);toast('Jeton FCM copié.');}
+  catch(e){alert(e.message||friendlyError(e));}
+}
+
+function pairExplicitlyIncompatible(date,a,b){
+  for(const [owner,responder] of [[a,b],[b,a]]){const ov=getAvail(date,owner);if(ov?.status!=='time')continue;const c=getCompat(date,owner,responder);if(c?.ownerTime===ov.time&&c.response==='no')return true;}return false;
+}
+function partitionPeople(items){
+  const out=[]; function rec(i,groups){if(i===items.length){out.push(groups.map(g=>[...g]));return;}const p=items[i];for(let g=0;g<groups.length;g++){groups[g].push(p);rec(i+1,groups);groups[g].pop();}groups.push([p]);rec(i+1,groups);groups.pop();}rec(0,[]);return out;
+}
+function globalCompatibilityState(date,people){
+  const unknown=unknownCompatibilities(date,people);
+  const rejected=explicitIncompatibilities(date,people);
+  return {unknown,rejected,pending:unknown.length>0};
+}
+function autoSuggestedGroups(date){
+  const availablePeople=PEOPLE.filter(p=>isAvailable(getAvail(date,p))); if(availablePeople.length<2)return {groups:[],singles:availablePeople,pending:false,unknown:[],rejected:[]};
+  const state=globalCompatibilityState(date,availablePeople);
+  // Tant qu'une compatibilité liée à un impératif n'est pas renseignée, on ne répartit personne.
+  // On conserve le groupe naturel complet comme aperçu, mais sa validation est bloquée.
+  if(state.pending){
+    const sug=driverSuggestion(date,availablePeople);
+    return {groups:[{id:`auto-${groupCode(availablePeople)}`,members:canonical(availablePeople),driver:sug.candidates[0]||canonical(availablePeople)[0]}],singles:[],pending:true,unknown:state.unknown,rejected:state.rejected};
+  }
+  const order=[...availablePeople].sort((a,b)=>{const av=getAvail(date,a),bv=getAvail(date,b);if(av?.status==='time'&&bv?.status!=='time')return -1;if(bv?.status==='time'&&av?.status!=='time')return 1;if(av?.status==='time'&&bv?.status==='time')return (av.time||'').localeCompare(bv.time||'');return label(a).localeCompare(label(b),'fr');});
+  let best=null,bestScore=Infinity; for(const part of partitionPeople(order)){
+    let invalid=false; for(const g of part){for(let i=0;i<g.length;i++)for(let j=i+1;j<g.length;j++){if(pairExplicitlyIncompatible(date,g[i],g[j]))invalid=true;}}
+    if(invalid)continue; const singles=part.filter(g=>g.length===1).length,score=singles*100+part.length*10;
+    if(score<bestScore){bestScore=score;best=part;}
+  }
+  const part=best||order.map(p=>[p]); const singles=part.filter(g=>g.length===1).flat(); const groups=part.filter(g=>g.length>=2).map(g=>{const sug=driverSuggestion(date,g);return{id:`auto-${groupCode(g)}`,members:canonical(g),driver:sug.candidates[0]||canonical(g)[0]};}); return {groups,singles,pending:false,unknown:[],rejected:state.rejected};
+}
+function proposalForDate(date){
+  const saved=currentPlan(date);
+  if(saved.length){
+    const all=canonical(saved.flatMap(g=>g.members)); const state=globalCompatibilityState(date,all);
+    return{groups:saved,singles:[],saved:true,pending:state.pending,unknown:state.unknown,rejected:state.rejected};
+  }
+  const auto=autoSuggestedGroups(date);return{...auto,saved:false};
+}
+function normalizedGroupSignature(groups){return groups.map(g=>`${canonical(g.members||g.participants||[]).join('|')}>${g.driver||g.driverId||''}`).sort().join('||');}
+function validatedSummaryHTML(ds){
+  const groups=tripGroupsForDate(ds); if(!groups.length)return '';
+  const lines=groups.map((g,i)=>{const members=canonical(g.members||g.participants||[]),driver=g.driver||g.driverId,passengers=members.filter(p=>p!==driver);return `<div class="validated-line"><span>${groups.length>1?`<strong>Groupe ${i+1} · </strong>`:''}🚗 <strong>${label(driver)}</strong>${passengers.length?` · Passagers : ${passengers.map(label).join(', ')}`:''}</span></div>`;}).join('');
+  return `<div class="validated-summary"><div class="validated-title">✓ Covoiturage validé</div>${lines}</div>`;
+}
+function renderQuickProposal(ds){
+  const box=$('quickProposal'); if(!box)return; const proposal=proposalForDate(ds),gs=proposal.groups,validated=tripGroupsForDate(ds);
+  if(!gs.length){box.innerHTML=validatedSummaryHTML(ds)||'<div class="empty compact-empty">Pas encore de groupe proposé.</div>';return;}
+  const sameAsValidated=validated.length>0 && normalizedGroupSignature(gs)===normalizedGroupSignature(validated);
+  const groupsHtml=gs.map((g,i)=>{
+    const sug=driverSuggestion(ds,g.members),suggested=sug.candidates.length>1?`Égalité : ${sug.candidates.map(label).join(' / ')}`:`Suggéré : ${label(sug.candidates[0])}`;
+    return `<div class="proposal-group-simple ${i?'with-separator':''}">
+      <div class="proposal-main-line"><strong>${gs.length>1?`Groupe ${i+1} · `:''}${g.members.map(label).join(' · ')}</strong><span class="proposal-suggested">${suggested}</span></div>
+      <div class="proposal-counter-line">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div>
+      <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}">${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>
+    </div>`;
+  }).join('');
+  const pendingHtml=proposal.pending?`<div class="proposal-pending"><strong>⏳ Répartition en attente</strong>${proposal.rejected?.length?`${proposal.rejected.map(x=>`${label(x.responder)} ne peut pas partir à ${x.time} avec ${label(x.owner)}`).join(' · ')}<br>`:''}${proposal.unknown.length} réponse(s) de compatibilité encore attendue(s). Aucun groupe n’est réparti automatiquement avant ces réponses.</div>`:'';
+  box.innerHTML=`<div class="proposal-shell ${sameAsValidated?'is-validated':''}"><div class="proposal-head"><h3>Covoiturage proposé</h3>${proposal.saved?'<span class="small muted">modifié manuellement</span>':''}</div>${groupsHtml}${pendingHtml}${proposal.singles.length?`<div class="group-warning">Sans groupe : ${proposal.singles.map(label).join(', ')}</div>`:''}${validatedSummaryHTML(ds)}<div class="quick-actions"><button id="quickValidate" class="btn" ${(sameAsValidated||proposal.pending)?'disabled':''}>${proposal.pending?'En attente des réponses':sameAsValidated?'✓ Trajet validé':validated.length?'↻ Mettre à jour le trajet':`✓ Valider le${gs.length>1?'s':''} trajet${gs.length>1?'s':''}`}</button><button id="quickModify" class="btn secondary">Modifier</button></div>${IS_TEST&&validated.length?'<button id="quickResetTest" class="test-reset-link" type="button">↺ Réinitialiser ce trajet TEST</button>':''}<div id="quickSaveState" class="small muted quick-save-state"></div></div>`;
+  box.querySelectorAll('.quick-driver').forEach(sel=>sel.addEventListener('change',()=>{
+    const current=proposalForDate(ds).groups.map(g=>({...g})); const target=current.find(g=>g.id===sel.dataset.id)||current.find(g=>groupCode(g.members)===sel.dataset.id.replace('auto-','')); if(!target)return; target.driver=sel.value;
+    const savePromise=savePlan(ds,current); const state=$('quickSaveState'); if(state)state.textContent='Enregistrement du conducteur…';
+    savePromise.then(()=>{const st=$('quickSaveState');if(st)st.textContent='✓ Conducteur enregistré';}).catch(e=>alert(friendlyError(e)));
+  }));
+  const validateBtn=$('quickValidate'); if(validateBtn&&!sameAsValidated&&!proposal.pending)validateBtn.addEventListener('click',async()=>{validateBtn.disabled=true;validateBtn.textContent='Enregistrement…';const state=$('quickSaveState');if(state)state.textContent='Validation du covoiturage…';try{await validateGroupsForDate(ds,proposalForDate(ds).groups);renderTomorrow();}catch(e){alert(friendlyError(e));renderTomorrow();}});
+  $('quickModify').addEventListener('click',()=>{$('groupDate').value=ds;openPage('groups');renderGroups();});
+  const resetBtn=$('quickResetTest');if(resetBtn)resetBtn.addEventListener('click',()=>resetTestTrip(ds));
+}
+
+async function validateGroupsForDate(ds,groups){
+  if(!groups.length)return;const overlap=groupsHaveOverlap(groups);if(overlap){alert(`${label(overlap)} apparaît dans plusieurs groupes.`);return;}for(const g of groups){if(g.members.length<2||!g.members.includes(g.driver)){alert('Un groupe est invalide.');return;}if(!isPastDate(ds)&&explicitIncompatibilities(ds,g.members).length){alert('Un groupe contient une incompatibilité horaire.');return;}}
+  const existing=tripDays.get(ds),same=existing?.groups?.length&&normalizedGroupSignature(existing.groups)===normalizedGroupSignature(groups);if(existing?.groups?.length&&!same&&!confirm(`Des trajets sont déjà validés pour ${fmtDate(ds)}. Les remplacer ?`))return;
+  const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver,source:IS_TEST?'test':'app'})); const previousTrip=tripDays.get(ds),previousPlan=plans.get(ds);
+  tripDays.set(ds,{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedBy:profileId}); plans.set(ds,{date:ds,groups:normalized,updatedBy:profileId}); if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups')){renderGroups();renderValidatedInfo(ds);} if(activePage('history')){renderSummary();renderHistory();}
+  try{await Promise.all([setDoc(doc(db,'tripDays',ds),{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedAt:serverTimestamp(),updatedBy:profileId}),setDoc(doc(db,'plans',ds),{date:ds,groups:normalized,validatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:profileId})]);toast('✓ Trajet enregistré');}
+  catch(e){if(previousTrip)tripDays.set(ds,previousTrip);else tripDays.delete(ds);if(previousPlan)plans.set(ds,previousPlan);else plans.delete(ds);refreshForData('tripDays');refreshForData('plans');throw e;}
+}
+
+async function resetTestTrip(ds){
+  if(!IS_TEST||linkedProfileId!=='igor')return;
+  const previousTrip=tripDays.get(ds),previousPlan=plans.get(ds);
+  tripDays.delete(ds);plans.delete(ds);
+  if(activePage('tomorrow'))renderTomorrow();if(activePage('groups')){renderGroups();renderValidatedInfo(ds);}if(activePage('history')){renderSummary();renderHistory();}
+  toast('🧪 Trajet TEST réinitialisé · enregistrement…');
+  try{
+    await Promise.all([deleteDoc(doc(db,'tripDays',ds)),deleteDoc(doc(db,'plans',ds))]);
+    toast('✓ Prêt pour un nouveau test');
+  }catch(e){
+    if(previousTrip)tripDays.set(ds,previousTrip);
+    if(previousPlan)plans.set(ds,previousPlan);
+    refreshForData('tripDays');refreshForData('plans');alert(friendlyError(e));
+  }
+}
+
+function counterSnapshotAfterTrip(t){
+  const target=canonical(t.participants).join('|'),counts=Object.fromEntries(canonical(t.participants).map(p=>[p,0])); flattenTrips().filter(x=>x.date<=t.date&&canonical(x.participants).join('|')===target).sort((a,b)=>a.date.localeCompare(b.date)).forEach(x=>{if(x.driver in counts)counts[x.driver]++;}); return counts;
+}
+function qualityChecks(){
+  const issues=[]; tripDays.forEach((day,date)=>{const seen=new Set(),codes=new Set();for(const g of day.groups||[]){const m=canonical(g.members||g.participants||[]),driver=g.driver||g.driverId;if(m.length<2)issues.push(`${date} : groupe de moins de 2 personnes`);if(!driver||!m.includes(driver))issues.push(`${date} : conducteur absent du groupe ${groupCode(m)}`);const code=m.join('|');if(codes.has(code))issues.push(`${date} : groupe ${groupCode(m)} enregistré deux fois`);codes.add(code);for(const p of m){if(seen.has(p))issues.push(`${date} : ${label(p)} apparaît dans plusieurs groupes`);seen.add(p);const av=getAvail(date,p);if(av&&(av.status==='absent'||av.status==='alone'))issues.push(`${date} : ${label(p)} est dans un trajet mais son statut est « ${statusMeta(av).label} »`);}}});return [...new Set(issues)];
+}
+function renderQualityChecks(){const items=qualityChecks(),box=$('qualityBox'),list=$('qualityList');if(!items.length){box.className='notice oknotice';list.innerHTML='✅ Tout est OK.';}else{box.className='notice';list.innerHTML=items.slice(0,30).map(x=>`<div>• ${x}</div>`).join('')+(items.length>30?`<div>… et ${items.length-30} autre(s)</div>`:'');}}
+
+function renderCalendarExceptions(){
+  const box=$('calendarExceptions');if(!box)return;const xs=[...(calendarConfig?.exceptions||[])].sort((a,b)=>a.date.localeCompare(b.date));box.innerHTML=xs.length?xs.map((x,i)=>`<div class="calendar-item"><strong>${x.date}</strong><span class="pill ${x.type==='off'?'absent':'present'}">${x.type==='off'?'Non travaillé':'Travaillé'}</span><span class="grow small muted">${x.note||''}</span><button class="btn danger smallbtn remove-calendar" data-i="${i}">Suppr.</button></div>`).join(''):'<div class="small muted">Aucune exception entreprise.</div>';box.querySelectorAll('.remove-calendar').forEach(b=>b.addEventListener('click',()=>removeCalendarException(Number(b.dataset.i))));
+}
+async function addCalendarException(){const date=$('calendarDate').value;if(!date){alert('Choisis une date.');return;}const type=$('calendarType').value,note=$('calendarNote').value.trim(),xs=[...(calendarConfig?.exceptions||[])].filter(x=>x.date!==date);xs.push({date,type,note});await setDoc(doc(db,'config','calendar'),{exceptions:xs,updatedAt:serverTimestamp()},{merge:true});$('calendarNote').value='';toast('Exception calendrier ajoutée.');}
+async function removeCalendarException(i){const xs=[...(calendarConfig?.exceptions||[])];xs.splice(i,1);await setDoc(doc(db,'config','calendar'),{exceptions:xs,updatedAt:serverTimestamp()},{merge:true});toast('Exception supprimée.');}
+
+const SNAPSHOT_COLLECTIONS=['profiles','availability','legacyStatus','compatibilities','plans','tripDays','preferences'];
+async function exportTestSnapshot(){
+  if(linkedProfileId!=='igor')return;const data={schema:1,exportedAt:new Date().toISOString(),collections:{},calendar:calendarConfig||{exceptions:[]}};for(const name of SNAPSHOT_COLLECTIONS){const snap=await getDocs(collection(db,name));data.collections[name]=snap.docs.map(d=>({id:d.id,data:d.data()}));}downloadJson(data,`Covoiturage_TEST_snapshot_${todayISO()}.json`);toast('Copie TEST exportée.');
+}
+function downloadJson(data,name){const blob=new Blob([JSON.stringify(data,(k,v)=>v?.toDate?v.toDate().toISOString():v,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+async function importTestSnapshot(){
+  if(!IS_TEST||linkedProfileId!=='igor')return;const f=$('testSnapshotFile').files?.[0];if(!f){alert('Choisis le fichier de copie TEST.');return;}const payload=JSON.parse(await f.text());if(!confirm('Remplacer les données métier de la base TEST par cette copie ?'))return;
+  for(const name of SNAPSHOT_COLLECTIONS){const old=await getDocs(collection(db,name));for(let i=0;i<old.docs.length;i+=400){const b=writeBatch(db);old.docs.slice(i,i+400).forEach(d=>b.delete(d.ref));await b.commit();}const recs=payload.collections?.[name]||[];for(let i=0;i<recs.length;i+=400){const b=writeBatch(db);recs.slice(i,i+400).forEach(r=>b.set(doc(db,name,r.id),r.data));await b.commit();}}
+  await setDoc(doc(db,'config','calendar'),payload.calendar||{exceptions:[]});toast('Base TEST actualisée.');
+}
 async function installPwa(){
   if(installPrompt){installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;$('installBtn').style.display='none';return;}
   const isiOS=/iphone|ipad|ipod/i.test(navigator.userAgent);if(isiOS)alert('Sur iPhone/iPad : Safari → bouton Partager → Ajouter à l’écran d’accueil.');else alert('Utilise le menu du navigateur puis “Installer l’application” ou “Ajouter à l’écran d’accueil”.');
 }
 
-window.addEventListener('online',()=>{$('syncDot')?.classList.remove('off');if($('syncText'))$('syncText').textContent='Base commune';});
-window.addEventListener('offline',()=>{$('syncDot')?.classList.add('off');if($('syncText'))$('syncText').textContent='Hors ligne';});
+window.addEventListener('online',()=>showConnectionAlert(''));
+window.addEventListener('offline',()=>showConnectionAlert('Hors connexion'));
 window.addEventListener('beforeunload',()=>unsubscribers.forEach(f=>f()));
 
 start();

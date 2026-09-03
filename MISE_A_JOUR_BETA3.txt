@@ -1,0 +1,9 @@
+MISE À JOUR TEST 4.4.0-beta.3
+
+1. Décompresser le ZIP.
+2. Remplacer les fichiers correspondants à la racine du dépôt GitHub team-tool-test.
+3. Commit changes.
+4. Attendre le déploiement GitHub Pages.
+5. Fermer/réouvrir la PWA ou faire Ctrl+Shift+R sur PC.
+
+Aucune modification Firebase n’est nécessaire.
