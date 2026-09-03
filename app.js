@@ -629,7 +629,9 @@ function renderSettings(){
   const theme=pref(profileId).theme||'auto'; qsa('[data-theme]').forEach(b=>b.classList.toggle('active',b.dataset.theme===theme));
   const np=pref(linkedProfileId); $('notificationsToggle').checked=np.notificationsEnabled===true; $('notificationsToggle').disabled=IS_TEST&&profileId!==linkedProfileId;
   $('notificationStatus').textContent=(IS_TEST&&profileId!==linkedProfileId)?'Repasse sur Igor pour tester les notifications de cet appareil.':(np.notificationsEnabled?'Rappel activé à 20h.':'Désactivé par défaut.');
-  const nta=$('notificationTestActions'); if(nta)nta.style.display=(IS_TEST&&profileId===linkedProfileId&&np.notificationsEnabled)?'flex':'none';
+  const canUseNotificationsHere=!IS_TEST||profileId===linkedProfileId;
+  const nta=$('notificationTestActions'); if(nta)nta.style.display=(canUseNotificationsHere&&np.notificationsEnabled)?'flex':'none';
+  const copyTokenBtn=$('copyFcmTokenBtn'); if(copyTokenBtn)copyTokenBtn.style.display=IS_TEST?'':'none';
   $('simulatedBadge').style.display=IS_TEST&&profileId!==linkedProfileId?'inline-block':'none'; $('simulatedBadge').textContent=IS_TEST&&profileId!==linkedProfileId?`simule ${label(profileId)}`:'';
 }
 function switchTestUser(pid){ if(!IS_TEST||!PEOPLE.includes(pid))return; profileId=pid; $('identityName').textContent=label(pid); applyTheme(); renderAll(); renderSettings(); closeSettingsMenu(); toast(`Simulation : ${label(pid)}`); }
@@ -668,7 +670,7 @@ async function testLocalNotification(){
   try{
     if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
     const reg=messagingSwRegistration || await navigator.serviceWorker.ready;
-    await reg.showNotification('Covoiturage · TEST',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
+    await reg.showNotification(IS_TEST?'Covoiturage · TEST':'Covoiturage',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
     toast('Notification de test envoyée sur cet appareil.');
   }catch(e){alert(e.message||friendlyError(e));}
 }
