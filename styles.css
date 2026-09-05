@@ -255,3 +255,7 @@ html[data-theme="dark"] .coffee-icon-btn{background:#151b22;color:var(--ink)}
 /* beta.6 */
 .validated-line{display:block}
 .validated-line span{display:block}
+/* 4.4.0-beta.12 — rappel trajet non validé */
+.unvalidated-trip-notice{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0 2px}
+.unvalidated-trip-notice .small{margin-top:2px}
+@media(max-width:520px){.unvalidated-trip-notice{align-items:flex-start}.unvalidated-trip-notice .btn{flex:0 0 auto}}
