@@ -54,7 +54,7 @@
     <div class="small muted">Le compte Firebase réel reste Igor. Seules les données métier sont simulées.</div>
   </div>
   <div class="settings-block"><h3>Apparence</h3><div class="segmented"><button data-theme="auto">Auto</button><button data-theme="light">Clair</button><button data-theme="dark">Sombre</button></div></div>
-  <div class="settings-block"><h3>Notifications</h3><label class="toggle-row"><span><strong>Rappel de saisie</strong><span class="small muted">À 20h si le lendemain est travaillé et non renseigné.</span></span><input id="notificationsToggle" type="checkbox"></label><div id="notificationStatus" class="small muted"></div><div id="notificationTestActions" class="notification-test-actions" style="display:none"><button id="localNotificationTestBtn" class="btn secondary smallbtn" type="button">🔔 Tester sur cet appareil</button><button id="copyFcmTokenBtn" class="btn ghost smallbtn" type="button">Copier le jeton FCM</button></div></div>
+  <div class="settings-block"><h3>Notifications</h3><label class="toggle-row"><span><strong>Rappel de saisie</strong><span class="small muted">À 20h si le lendemain est travaillé et non renseigné.</span></span><input id="notificationsToggle" type="checkbox"></label><div id="notificationStatus" class="small muted"></div><div id="notificationTestActions" class="notification-test-actions" style="display:none"><button id="localNotificationTestBtn" class="btn secondary smallbtn" type="button">🔔 Tester maintenant</button><button id="copyFcmTokenBtn" class="btn ghost smallbtn" type="button">Copier le jeton FCM</button></div></div>
   <div id="adminMenuBlock" class="settings-block" style="display:none"><button id="openAdminBtn" class="btn secondary full">Administration</button></div>
   <div class="settings-block about-block">
     <button id="aboutToggle" class="menu-link" type="button"><span>À propos</span><span>›</span></button>
@@ -81,7 +81,7 @@
           <button class="status-btn status-time" data-status="time">⏱ Impératif</button>
         </div>
         <div id="myTomorrowSummary" class="sr-only"></div>
-        <div id="timeBox" class="compact-timebox" style="display:none"><div class="field"><label>Départ au plus tard</label><select id="timeLimit"></select></div><button class="btn smallbtn" id="saveTime">OK</button></div>
+        <div id="timeBox" class="compact-timebox" style="display:none"><div class="field"><label>Départ</label><select id="timeLimit"></select></div><button class="btn smallbtn" id="saveTime">OK</button></div>
         <div id="timeCompatibilityBox" class="compat-box compact-compat" style="display:none"></div>
       </div>
       <div class="mini-panel collective-panel">
@@ -95,7 +95,7 @@
 
 <section id="planning" class="page"><div class="card">
   <h1>Mon planning</h1><p class="muted">Renseigne une période entière puis ajuste une journée si besoin.</p>
-  <div class="row"><div class="field"><label>Du</label><input id="rangeStart" type="date"></div><div class="field"><label>Au</label><input id="rangeEnd" type="date"></div><div class="field"><label>Statut</label><select id="rangeStatus"><option value="present">Présent</option><option value="absent">Absent</option><option value="alone">Seul</option><option value="time">Impératif horaire</option></select></div><div class="field" id="rangeTimeField" style="display:none"><label>Heure maxi</label><select id="rangeTime"></select></div><button class="btn" id="applyRange">Appliquer aux jours travaillés</button></div>
+  <div class="row"><div class="field"><label>Du</label><input id="rangeStart" type="date"></div><div class="field"><label>Au</label><input id="rangeEnd" type="date"></div><div class="field"><label>Statut</label><select id="rangeStatus"><option value="present">Présent</option><option value="absent">Absent</option><option value="alone">Seul</option><option value="time">Impératif horaire</option></select></div><div class="field" id="rangeTimeField" style="display:none"><label>Départ</label><select id="rangeTime"></select></div><button class="btn" id="applyRange">Appliquer aux jours travaillés</button></div>
   <h3>Prochains jours travaillés</h3><div id="plannerList"></div>
 </div></section>
 

@@ -9,7 +9,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 const ENV = globalThis.COVOIT_ENV || {};
 const firebaseConfig = ENV.firebaseConfig || {};
-const APP_VERSION = ENV.version || '4.4.0';
+const APP_VERSION = ENV.version || '4.4.1';
 const IS_TEST = ENV.environment === 'test';
 const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
@@ -26,6 +26,8 @@ const STATUS = {
   present:{label:'Présent',cls:'present'}, absent:{label:'Absent',cls:'absent'},
   alone:{label:'Seul',cls:'alone'}, time:{label:'Impératif',cls:'time'}, missing:{label:'Non renseigné',cls:'missing'}
 };
+const LATE_UNKNOWN = 'late_unknown';
+const timeLabel = value => value===LATE_UNKNOWN ? '?' : (value||'');
 
 
 let authUser = null;
@@ -42,6 +44,8 @@ let calendarConfig = {exceptions:[]};
 let unsubscribers = [];
 let installPrompt = null;
 let initializedSnapshots = new Set();
+let tripDaysReady = false;
+let legacyStatusReady = false;
 let appUiInitialized = false;
 let accessUiInitialized = false;
 
@@ -117,7 +121,7 @@ function showAccess(message=''){
 function showApp(){ $('accessScreen').style.display='none'; $('appShell').style.display='block'; }
 function statusMeta(v){
   if(!v)return STATUS.missing;
-  if(v.status==='time')return {label:`Impératif ${v.time||''}`.trim(),cls:'time'};
+  if(v.status==='time')return {label:`Impératif ${timeLabel(v.time)}`.trim(),cls:'time'};
   return STATUS[v.status]||STATUS.missing;
 }
 function isAvailable(v){ return !!v && (v.status==='present'||v.status==='time'); }
@@ -275,10 +279,28 @@ function refreshForData(name){
   if(name==='calendar'){ if(activePage('tomorrow'))renderTomorrow(); if(activePage('planning'))renderPlanning(); if(activePage('groups'))renderGroups(); if(activePage('admin'))renderAdmin(); }
 }
 function subscribeSharedData(){
-  setLoading('Chargement des données…','Synchronisation de l’historique et des disponibilités.');
+  setLoading('Chargement du prochain covoiturage…','Synchronisation des disponibilités.');
   let initialRendered=false;
+  let deferredStarted=false;
+  const criticalNames=['profiles','availability','compatibilities','plans','preferences','calendar'];
+  const startDeferred=()=>{
+    if(deferredStarted)return;
+    deferredStarted=true;
+    const begin=()=>{
+      watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); tripDaysReady=true; });
+      watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); legacyStatusReady=true; });
+    };
+    if('requestIdleCallback' in window) requestIdleCallback(begin,{timeout:1200});
+    else setTimeout(begin,150);
+  };
   const completeInitial=()=>{
-    if(initializedSnapshots.size>=8 && !initialRendered){ initialRendered=true; hideLoading(); renderAll(); }
+    if(initialRendered || !criticalNames.every(name=>initializedSnapshots.has(name)))return;
+    initialRendered=true;
+    applyTheme();
+    renderTomorrow();
+    renderSettings();
+    hideLoading();
+    startDeferred();
   };
   const watch=(name,ref,handler)=>{
     const off=onSnapshot(ref,snap=>{
@@ -288,10 +310,8 @@ function subscribeSharedData(){
   };
   watch('profiles',collection(db,'profiles'),snap=>{ profiles=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   watch('availability',collection(db,'availability'),snap=>{ availability=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   watch('compatibilities',collection(db,'compatibilities'),snap=>{ compatibilities=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   watch('plans',collection(db,'plans'),snap=>{ plans=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   watch('preferences',collection(db,'preferences'),snap=>{ preferences=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   const offCalendar=onSnapshot(doc(db,'config','calendar'),snap=>{ calendarConfig=snap.exists()?snap.data():{exceptions:[]}; initializedSnapshots.add('calendar'); completeInitial(); if(initialRendered)refreshForData('calendar'); },err=>{console.error('calendar',err); initializedSnapshots.add('calendar'); completeInitial();});
   unsubscribers.push(offCalendar);
@@ -299,6 +319,8 @@ function subscribeSharedData(){
 
 function initStaticUI(){
   fillTimeSelect($('timeLimit'),'16:15'); fillTimeSelect($('rangeTime'),'16:15');
+  const unknownHelp=document.createElement('div'); unknownHelp.id='timeUnknownHelp'; unknownHelp.className='small muted'; unknownHelp.textContent='? = heure de départ inconnue, dépendante de la situation.'; unknownHelp.style.display='none'; $('timeLimit').insertAdjacentElement('afterend',unknownHelp);
+  $('timeLimit').addEventListener('change',syncUnknownTimeHelp);
   const t=nextCarpoolISO(); $('groupDate').value=t; $('rangeStart').value=t; $('rangeEnd').value=iso(addDays(fromISO(t),4));
   qsa('#nav button[data-page]').forEach(b=>b.addEventListener('click',()=>openPage(b.dataset.page)));
   qsa('.status-btn').forEach(b=>b.addEventListener('click',()=>handleTomorrowStatus(b.dataset.status)));
@@ -317,6 +339,7 @@ function initStaticUI(){
   if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(console.warn);
   initMessaging().catch(console.warn);
 }
+function syncUnknownTimeHelp(){const help=$('timeUnknownHelp');if(help)help.style.display=$('timeLimit')?.value===LATE_UNKNOWN?'block':'none';}
 function fillTimeSelect(sel,value='16:15'){
   sel.innerHTML='';
   const start=15*60+15, end=18*60;
@@ -325,15 +348,25 @@ function fillTimeSelect(sel,value='16:15'){
     const v=`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
     const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);
   }
+  const late=document.createElement('option');late.value=LATE_UNKNOWN;late.textContent=timeLabel(LATE_UNKNOWN);sel.appendChild(late);
   sel.value=[...sel.options].some(o=>o.value===value)?value:'16:15';
 }
 function openPage(page){
   qsa('.page').forEach(x=>x.classList.toggle('active',x.id===page)); qsa('#nav button[data-page]').forEach(x=>x.classList.toggle('active',x.dataset.page===page));
-  if(page==='groups')renderGroups(); if(page==='history'){renderSummary();renderHistory();} if(page==='admin')renderAdmin();
+  if(page==='tomorrow')renderTomorrow(); if(page==='planning')renderPlanning(); if(page==='groups')renderGroups(); if(page==='history'){renderSummary();renderHistory();} if(page==='admin')renderAdmin();
 }
 async function handleTomorrowStatus(st){
-  if(st==='time'){const v=getAvail(nextCarpoolISO(),profileId);$('timeLimit').value=v?.time||'16:15';$('timeBox').style.display='flex';return;}
-  $('timeBox').style.display='none';await setAvailability(nextCarpoolISO(),st,null);
+  const ds=nextCarpoolISO();
+  if(st==='time'){
+    const v=getAvail(ds,profileId);
+    const selected=(v?.status==='time'&&v?.time)?v.time:'16:15';
+    $('timeLimit').value=selected;
+    $('timeBox').style.display='flex';
+    syncUnknownTimeHelp();
+    if(v?.status!=='time'||v?.time!==selected) await setAvailability(ds,'time',selected);
+    return;
+  }
+  $('timeBox').style.display='none';await setAvailability(ds,st,null);
 }
 async function setAvailability(date,status,time=null){
   const key=availKey(date,profileId), previous=availability.get(key);
@@ -363,7 +396,7 @@ function renderTomorrow(){
   const ds=nextCarpoolISO(); $('tomorrowTitle').textContent=fmtDate(ds); $('tomorrowSubtitle').textContent='Prochain jour travaillé';
   const mine=getAvail(ds,profileId),mineMeta=statusMeta(mine);
   qsa('.status-btn').forEach(b=>b.classList.toggle('selected',mine?.status===b.dataset.status));
-  $('timeBox').style.display=mine?.status==='time'?'flex':'none'; if(mine?.status==='time')$('timeLimit').value=mine.time||'16:15';
+  $('timeBox').style.display=mine?.status==='time'?'flex':'none'; if(mine?.status==='time')$('timeLimit').value=mine.time||'16:15'; syncUnknownTimeHelp();
   const mineSummary=$('myTomorrowSummary'); if(mineSummary)mineSummary.textContent='';
   const box=$('collectiveTomorrow');box.innerHTML='';let answered=0;
   PEOPLE.forEach(p=>{const v=getAvail(ds,p);if(v)answered++;const m=statusMeta(v);const row=document.createElement('div');row.className='person-row compact-person';row.innerHTML=`<div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong></div><span class="pill ${m.cls}">${m.label}</span>`;box.appendChild(row);});
@@ -379,7 +412,14 @@ function renderTimeCompatibility(ds,mine){
   constraints.forEach(({p,v})=>{
     const r=getCompat(ds,p,profileId); const current=(r&&r.ownerTime===v.time)?r.response:null;
     const item=document.createElement('div');item.className='compat-item';
-    item.innerHTML=`<div><strong>${label(p)}</strong> doit partir au plus tard à <strong>${v.time}</strong>.</div><div class="small muted">Peux-tu partir avec ${label(p)} à cet horaire ?</div>
+    const lateUnknown=v.time===LATE_UNKNOWN;
+    const constraintText=lateUnknown
+      ? `<strong>${label(p)}</strong> veut partir tard, à une heure inconnue.`
+      : `<strong>${label(p)}</strong> veut partir à <strong>${timeLabel(v.time)}</strong>.`;
+    const question=lateUnknown
+      ? `Peux-tu partir avec ${label(p)} malgré cette incertitude ?`
+      : `Peux-tu partir avec ${label(p)} à cet horaire ?`;
+    item.innerHTML=`<div>${constraintText}</div><div class="small muted">${question}</div>
       <div class="compat-actions"><button class="compat-btn yes ${current==='yes'?'selected':''}" data-owner="${p}" data-answer="yes">✅ Oui</button><button class="compat-btn no ${current==='no'?'selected':''}" data-owner="${p}" data-answer="no">❌ Non</button></div>`;
     box.appendChild(item);
   });
@@ -447,7 +487,17 @@ function unknownCompatibilities(date,members){
   }); return out;
 }
 function renderGroups(){
-  if(!$('availablePeople'))return; const ds=$('groupDate').value||nextCarpoolISO();
+  if(!$('availablePeople'))return;
+  if(!tripDaysReady){
+    $('availablePeople').innerHTML='<div class="empty">Chargement des compteurs de rotation…</div>';
+    if($('draftGroups'))$('draftGroups').innerHTML='';
+    if($('validatedTodayInfo'))$('validatedTodayInfo').innerHTML='';
+    if($('addGroup'))$('addGroup').disabled=true;
+    if($('validateTrips'))$('validateTrips').disabled=true;
+    return;
+  }
+  if($('addGroup'))$('addGroup').disabled=false;
+  const ds=$('groupDate').value||nextCarpoolISO();
   const past=isPastDate(ds); const groups=currentPlan(ds); const assigned=new Set(groups.flatMap(g=>g.members));
   const box=$('availablePeople');box.innerHTML='';
   PEOPLE.forEach(p=>{
@@ -469,8 +519,8 @@ function renderGroupCompatibilityMessage(ds){
     return;
   }
   const bad=explicitIncompatibilities(ds,members),unknown=unknownCompatibilities(ds,members);
-  if(bad.length)msg.innerHTML=`<div class="group-error">❌ Groupe incompatible : ${bad.map(x=>`${label(x.responder)} a refusé ${x.time} avec ${label(x.owner)}`).join(' · ')}</div>`;
-  else if(unknown.length)msg.innerHTML=`<div class="group-warning">⚠️ Compatibilité non confirmée : ${unknown.map(x=>`${label(x.responder)} ↔ ${label(x.owner)} ${x.time}`).join(' · ')}</div>`;
+  if(bad.length)msg.innerHTML=`<div class="group-error">❌ Groupe incompatible : ${bad.map(x=>`${label(x.responder)} a refusé ${timeLabel(x.time)} avec ${label(x.owner)}`).join(' · ')}</div>`;
+  else if(unknown.length)msg.innerHTML=`<div class="group-warning">⚠️ Compatibilité non confirmée : ${unknown.map(x=>`${label(x.responder)} ↔ ${label(x.owner)} ${timeLabel(x.time)}`).join(' · ')}</div>`;
   else msg.innerHTML='';
 }
 function flattenTrips(){
@@ -543,7 +593,13 @@ async function deleteHistoryGroup(date,id){
 
 function periodMatch(date,period){if(period==='month')return date.startsWith(currentYM());if(period==='year')return date.startsWith(`${nowYear()}-`);return true;}
 function renderSummary(){
-  if(!$('summaryUser'))return; const period=$('summaryPeriod').value; $('summaryUser').textContent=label(profileId);
+  if(!$('summaryUser'))return;
+  $('summaryUser').textContent=label(profileId);
+  if(!tripDaysReady || !legacyStatusReady){
+    ['kDriver','kPassenger','kCarpooled','kTracked'].forEach(id=>{if($(id))$(id).textContent='…';});
+    return;
+  }
+  const period=$('summaryPeriod').value;
   let driver=0,passenger=0;const carpoolDates=new Set(); flattenTrips().filter(t=>periodMatch(t.date,period)).forEach(t=>{if(t.participants.includes(profileId)){carpoolDates.add(t.date);if(t.driver===profileId)driver++;else passenger++;}});
   const current=[...availability.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period)); const currentByDate=new Map(current.map(v=>[v.date,v]));
   const legacy=[...legacyStatus.values()].filter(v=>v.profileId===profileId&&periodMatch(v.date,period)&&!currentByDate.has(v.date)&&!carpoolDates.has(v.date));
@@ -555,7 +611,13 @@ function buildHistoryCounterSnapshots(trips){
   for(const t of ordered){const members=canonical(t.participants),key=members.join('|');let state=states.get(key);if(!state){state=Object.fromEntries(members.map(p=>[p,0]));states.set(key,state);}if(t.driver in state)state[t.driver]++;snapshots.set(`${t.date}|${t.id}`,{...state});}return snapshots;
 }
 function renderHistory(){
-  if(!$('historyList'))return; const raw=flattenTrips(),counterSnapshots=buildHistoryCounterSnapshots(raw),all=[...raw].sort((a,b)=>b.date.localeCompare(a.date)); $('historyCount').textContent=all.length; renderQualityChecks(all);
+  if(!$('historyList'))return;
+  if(!tripDaysReady){
+    $('historyCount').textContent='…';
+    $('historyList').innerHTML='<div class="empty">Chargement de l’historique…</div>';
+    return;
+  }
+  const raw=flattenTrips(),counterSnapshots=buildHistoryCounterSnapshots(raw),all=[...raw].sort((a,b)=>b.date.localeCompare(a.date)); $('historyCount').textContent=all.length; renderQualityChecks(all);
   const q=($('historyFilter').value||'').trim().toLowerCase();let ts=all; if(q)ts=ts.filter(t=>`${t.date} ${groupCode(t.participants)} ${canonical(t.participants).map(label).join(' ')} ${label(t.driver)}`.toLowerCase().includes(q)); ts=ts.slice(0,300);
   $('historyList').innerHTML=ts.map(t=>{const counts=counterSnapshots.get(`${t.date}|${t.id}`)||{};return `<div class="hist-row"><div>${t.date}</div><div><strong>${groupCode(t.participants)}</strong> · ${canonical(t.participants).map(label).join(', ')}</div><div class="driver">🚗 ${label(t.driver)}</div><div class="hist-actions"><button class="btn secondary smallbtn edit-trip" data-date="${t.date}">Modifier</button><button class="btn danger smallbtn delete-trip" data-date="${t.date}" data-id="${t.id}">Suppr.</button></div><div class="hist-counter">Compteurs après ce trajet : ${canonical(t.participants).map(p=>`${label(p)} <strong>${counts[p]||0}</strong>`).join(' · ')}</div></div>`;}).join('')||'<div class="empty">Aucun résultat.</div>';
   $('historyList').querySelectorAll('.edit-trip').forEach(b=>b.addEventListener('click',()=>loadValidatedIntoPlan(b.dataset.date))); $('historyList').querySelectorAll('.delete-trip').forEach(b=>b.addEventListener('click',()=>deleteHistoryGroup(b.dataset.date,b.dataset.id)));
@@ -629,9 +691,7 @@ function renderSettings(){
   const theme=pref(profileId).theme||'auto'; qsa('[data-theme]').forEach(b=>b.classList.toggle('active',b.dataset.theme===theme));
   const np=pref(linkedProfileId); $('notificationsToggle').checked=np.notificationsEnabled===true; $('notificationsToggle').disabled=IS_TEST&&profileId!==linkedProfileId;
   $('notificationStatus').textContent=(IS_TEST&&profileId!==linkedProfileId)?'Repasse sur Igor pour tester les notifications de cet appareil.':(np.notificationsEnabled?'Rappel activé à 20h.':'Désactivé par défaut.');
-  const canUseNotificationsHere=!IS_TEST||profileId===linkedProfileId;
-  const nta=$('notificationTestActions'); if(nta)nta.style.display=(canUseNotificationsHere&&np.notificationsEnabled)?'flex':'none';
-  const copyTokenBtn=$('copyFcmTokenBtn'); if(copyTokenBtn)copyTokenBtn.style.display=IS_TEST?'':'none';
+  const nta=$('notificationTestActions'); if(nta)nta.style.display=(IS_TEST&&profileId===linkedProfileId&&np.notificationsEnabled)?'flex':'none';
   $('simulatedBadge').style.display=IS_TEST&&profileId!==linkedProfileId?'inline-block':'none'; $('simulatedBadge').textContent=IS_TEST&&profileId!==linkedProfileId?`simule ${label(profileId)}`:'';
 }
 function switchTestUser(pid){ if(!IS_TEST||!PEOPLE.includes(pid))return; profileId=pid; $('identityName').textContent=label(pid); applyTheme(); renderAll(); renderSettings(); closeSettingsMenu(); toast(`Simulation : ${label(pid)}`); }
@@ -670,7 +730,7 @@ async function testLocalNotification(){
   try{
     if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
     const reg=messagingSwRegistration || await navigator.serviceWorker.ready;
-    await reg.showNotification(IS_TEST?'Covoiturage · TEST':'Covoiturage',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
+    await reg.showNotification('Covoiturage · TEST',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
     toast('Notification de test envoyée sur cet appareil.');
   }catch(e){alert(e.message||friendlyError(e));}
 }
@@ -722,7 +782,9 @@ function validatedSummaryHTML(ds){
   return `<div class="validated-summary"><div class="validated-title">✓ Covoiturage validé</div>${lines}</div>`;
 }
 function renderQuickProposal(ds){
-  const box=$('quickProposal'); if(!box)return; const proposal=proposalForDate(ds),gs=proposal.groups,validated=tripGroupsForDate(ds);
+  const box=$('quickProposal'); if(!box)return;
+  if(!tripDaysReady){box.innerHTML='<div class="empty compact-empty">Calcul de la proposition…</div>';return;}
+  const proposal=proposalForDate(ds),gs=proposal.groups,validated=tripGroupsForDate(ds);
   if(!gs.length){box.innerHTML=validatedSummaryHTML(ds)||'<div class="empty compact-empty">Pas encore de groupe proposé.</div>';return;}
   const sameAsValidated=validated.length>0 && normalizedGroupSignature(gs)===normalizedGroupSignature(validated);
   const groupsHtml=gs.map((g,i)=>{
@@ -733,7 +795,7 @@ function renderQuickProposal(ds){
       <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}">${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>
     </div>`;
   }).join('');
-  const pendingHtml=proposal.pending?`<div class="proposal-pending"><strong>⏳ Répartition en attente</strong>${proposal.rejected?.length?`${proposal.rejected.map(x=>`${label(x.responder)} ne peut pas partir à ${x.time} avec ${label(x.owner)}`).join(' · ')}<br>`:''}${proposal.unknown.length} réponse(s) de compatibilité encore attendue(s). Aucun groupe n’est réparti automatiquement avant ces réponses.</div>`:'';
+  const pendingHtml=proposal.pending?`<div class="proposal-pending"><strong>⏳ Répartition en attente</strong>${proposal.rejected?.length?`${proposal.rejected.map(x=>`${label(x.responder)} ne peut pas partir avec ${label(x.owner)} · ${timeLabel(x.time)}`).join(' · ')}<br>`:''}${proposal.unknown.length} réponse(s) de compatibilité encore attendue(s). Aucun groupe n’est réparti automatiquement avant ces réponses.</div>`:'';
   box.innerHTML=`<div class="proposal-shell ${sameAsValidated?'is-validated':''}"><div class="proposal-head"><h3>Covoiturage proposé</h3>${proposal.saved?'<span class="small muted">modifié manuellement</span>':''}</div>${groupsHtml}${pendingHtml}${proposal.singles.length?`<div class="group-warning">Sans groupe : ${proposal.singles.map(label).join(', ')}</div>`:''}${validatedSummaryHTML(ds)}<div class="quick-actions"><button id="quickValidate" class="btn" ${(sameAsValidated||proposal.pending)?'disabled':''}>${proposal.pending?'En attente des réponses':sameAsValidated?'✓ Trajet validé':validated.length?'↻ Mettre à jour le trajet':`✓ Valider le${gs.length>1?'s':''} trajet${gs.length>1?'s':''}`}</button><button id="quickModify" class="btn secondary">Modifier</button></div>${IS_TEST&&validated.length?'<button id="quickResetTest" class="test-reset-link" type="button">↺ Réinitialiser ce trajet TEST</button>':''}<div id="quickSaveState" class="small muted quick-save-state"></div></div>`;
   box.querySelectorAll('.quick-driver').forEach(sel=>sel.addEventListener('change',()=>{
     const current=proposalForDate(ds).groups.map(g=>({...g})); const target=current.find(g=>g.id===sel.dataset.id)||current.find(g=>groupCode(g.members)===sel.dataset.id.replace('auto-','')); if(!target)return; target.driver=sel.value;
