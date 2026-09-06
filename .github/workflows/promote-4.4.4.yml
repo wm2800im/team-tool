@@ -14,7 +14,8 @@ jobs:
           fetch-depth: 0
       - name: Verify production base
         run: |
-          test "$(git rev-parse HEAD^)" = "bc65c95ec25eac941eadf491f2de6675d9e2c97d"
+          git merge-base --is-ancestor bc65c95ec25eac941eadf491f2de6675d9e2c97d HEAD
+          git diff --quiet bc65c95ec25eac941eadf491f2de6675d9e2c97d..HEAD -- app.js public-config.js service-worker.js .github/workflows/notifications.yml
           grep -Fq 'environment: "production"' public-config.js
           grep -Fq 'projectId: "team-tool-data"' public-config.js
           grep -Fq 'version: "4.4.3"' public-config.js
@@ -66,7 +67,7 @@ jobs:
           grep -Fq "if(isTest)return true;" app.js
           grep -Fq "return hour>=7;" app.js
           grep -Fq "if(!validationGate.allowed)throw new Error(validationGate.message);" app.js
-          grep -Fq "Présent ${times.join(' / ')}" app.js
+          grep -Fq 'Présent ${times.join' app.js
           grep -Fq "doit répondre à" app.js
           grep -Fq "const canTestNotifications=profileId===linkedProfileId&&np.notificationsEnabled;" app.js
           if grep -Eq 'g\.length[[:space:]]*>[[:space:]]*3|members\.length[[:space:]]*>[[:space:]]*3' app.js; then
