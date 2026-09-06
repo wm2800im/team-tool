@@ -9,7 +9,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 const ENV = globalThis.COVOIT_ENV || {};
 const firebaseConfig = ENV.firebaseConfig || {};
-const APP_VERSION = ENV.version || '4.4.2';
+const APP_VERSION = ENV.version || '4.4.3';
 const IS_TEST = ENV.environment === 'test';
 const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
@@ -287,7 +287,6 @@ function subscribeSharedData(){
     if(deferredStarted)return;
     deferredStarted=true;
     const begin=()=>{
-      watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); tripDaysReady=true; });
       watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); legacyStatusReady=true; });
     };
     if('requestIdleCallback' in window) requestIdleCallback(begin,{timeout:1200});
@@ -308,6 +307,9 @@ function subscribeSharedData(){
     },err=>{console.error(name,err);showConnectionAlert('Erreur de synchronisation');});
     unsubscribers.push(off);
   };
+  // Les compteurs de rotation sont nécessaires à la proposition : on les charge immédiatement,
+  // sans les rendre bloquants pour l'affichage initial de la page.
+  watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); tripDaysReady=true; });
   watch('profiles',collection(db,'profiles'),snap=>{ profiles=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   watch('availability',collection(db,'availability'),snap=>{ availability=new Map(snap.docs.map(d=>[d.id,d.data()])); });
   watch('compatibilities',collection(db,'compatibilities'),snap=>{ compatibilities=new Map(snap.docs.map(d=>[d.id,d.data()])); });
@@ -732,7 +734,10 @@ function renderSettings(){
   const theme=pref(profileId).theme||'auto'; qsa('[data-theme]').forEach(b=>b.classList.toggle('active',b.dataset.theme===theme));
   const np=pref(linkedProfileId); $('notificationsToggle').checked=np.notificationsEnabled===true; $('notificationsToggle').disabled=IS_TEST&&profileId!==linkedProfileId;
   $('notificationStatus').textContent=(IS_TEST&&profileId!==linkedProfileId)?'Repasse sur Igor pour tester les notifications de cet appareil.':(np.notificationsEnabled?'Rappel activé à 20h.':'Désactivé par défaut.');
-  const nta=$('notificationTestActions'); if(nta)nta.style.display=(IS_TEST&&profileId===linkedProfileId&&np.notificationsEnabled)?'flex':'none';
+  const canTestNotifications=profileId===linkedProfileId&&np.notificationsEnabled;
+  const nta=$('notificationTestActions'); if(nta)nta.style.display=canTestNotifications?'flex':'none';
+  const localTestBtn=$('localNotificationTestBtn'); if(localTestBtn)localTestBtn.style.display=canTestNotifications?'inline-flex':'none';
+  const copyTokenBtn=$('copyFcmTokenBtn'); if(copyTokenBtn)copyTokenBtn.style.display=(IS_TEST&&canTestNotifications)?'inline-flex':'none';
   $('simulatedBadge').style.display=IS_TEST&&profileId!==linkedProfileId?'inline-block':'none'; $('simulatedBadge').textContent=IS_TEST&&profileId!==linkedProfileId?`simule ${label(profileId)}`:'';
 }
 function switchTestUser(pid){ if(!IS_TEST||!PEOPLE.includes(pid))return; profileId=pid; $('identityName').textContent=label(pid); applyTheme(); renderAll(); renderSettings(); closeSettingsMenu(); toast(`Simulation : ${label(pid)}`); }
@@ -771,7 +776,7 @@ async function testLocalNotification(){
   try{
     if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
     const reg=messagingSwRegistration || await navigator.serviceWorker.ready;
-    await reg.showNotification('Covoiturage · TEST',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
+    await reg.showNotification(IS_TEST?'Covoiturage · TEST':'Covoiturage',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
     toast('Notification de test envoyée sur cet appareil.');
   }catch(e){alert(e.message||friendlyError(e));}
 }
