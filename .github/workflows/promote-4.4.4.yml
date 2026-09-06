@@ -1,0 +1,111 @@
+name: Promote production 4.4.4
+on:
+  push:
+    paths:
+      - '.github/workflows/promote-4.4.4.yml'
+permissions:
+  contents: write
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify production base
+        run: |
+          test "$(git rev-parse HEAD^)" = "bc65c95ec25eac941eadf491f2de6675d9e2c97d"
+          grep -Fq 'environment: "production"' public-config.js
+          grep -Fq 'projectId: "team-tool-data"' public-config.js
+          grep -Fq 'version: "4.4.3"' public-config.js
+          grep -Fq "const CACHE='covoiturage-4.4.3';" service-worker.js
+          test "$(git hash-object .github/workflows/notifications.yml)" = "5723aac36d6641b2424b64cb59f51f9932b5bd20"
+      - name: Copy validated TEST application
+        run: |
+          curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/wm2800im/team-tool-test/42af6800a7343d05ac43f7533e84fc2cc3bacaa2/app.js \
+            --output /tmp/test-app.js
+          cp /tmp/test-app.js app.js
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('app.js')
+          text = p.read_text()
+          old = "const APP_VERSION = ENV.version || '4.4.0-beta.18';"
+          new = "const APP_VERSION = ENV.version || '4.4.4';"
+          if text.count(old) != 1:
+              raise SystemExit('Unexpected TEST app version marker')
+          p.write_text(text.replace(old, new, 1))
+
+          cfg = Path('public-config.js')
+          text = cfg.read_text()
+          old = 'version: "4.4.3"'
+          new = 'version: "4.4.4"'
+          if text.count(old) != 1:
+              raise SystemExit('Unexpected PROD config version marker')
+          cfg.write_text(text.replace(old, new, 1))
+
+          sw = Path('service-worker.js')
+          text = sw.read_text()
+          old = "const CACHE='covoiturage-4.4.3';"
+          new = "const CACHE='covoiturage-4.4.4';"
+          if text.count(old) != 1:
+              raise SystemExit('Unexpected PROD service worker cache marker')
+          sw.write_text(text.replace(old, new, 1))
+          PY
+      - name: Validate production candidate
+        run: |
+          node --check app.js
+          git diff --check
+          grep -Fq 'environment: "production"' public-config.js
+          grep -Fq 'projectId: "team-tool-data"' public-config.js
+          grep -Fq 'version: "4.4.4"' public-config.js
+          grep -Fq "const CACHE='covoiturage-4.4.4';" service-worker.js
+          ! grep -R -Fq 'team-tool-test-data' app.js public-config.js service-worker.js
+          grep -Fq "if(n.hour>=9)" app.js
+          grep -Fq "if(isTest)return true;" app.js
+          grep -Fq "return hour>=7;" app.js
+          grep -Fq "if(!validationGate.allowed)throw new Error(validationGate.message);" app.js
+          grep -Fq "Présent ${times.join(' / ')}" app.js
+          grep -Fq "doit répondre à" app.js
+          grep -Fq "const canTestNotifications=profileId===linkedProfileId&&np.notificationsEnabled;" app.js
+          if grep -Eq 'g\.length[[:space:]]*>[[:space:]]*3|members\.length[[:space:]]*>[[:space:]]*3' app.js; then
+            echo 'Unexpected maximum group size 3 restriction'
+            exit 1
+          fi
+          cp /tmp/test-app.js /tmp/expected-app.js
+          sed -i "s/const APP_VERSION = ENV.version || '4.4.0-beta.18';/const APP_VERSION = ENV.version || '4.4.4';/" /tmp/expected-app.js
+          cmp app.js /tmp/expected-app.js
+          cat > /tmp/test-validation-rule.cjs <<'NODE'
+          const fs=require('fs');
+          const vm=require('vm');
+          const assert=require('assert');
+          const src=fs.readFileSync('app.js','utf8');
+          const m=src.match(/function tripValidationRule\(ds,today,hour,isTest\)\{[\s\S]*?\n\}/);
+          assert(m,'tripValidationRule not found');
+          vm.runInThisContext(m[0]);
+          assert.strictEqual(tripValidationRule('2026-09-07','2026-09-06',3,true),true);
+          assert.strictEqual(tripValidationRule('2026-09-06','2026-09-06',6,false),false);
+          assert.strictEqual(tripValidationRule('2026-09-06','2026-09-06',7,false),true);
+          assert.strictEqual(tripValidationRule('2026-09-05','2026-09-06',2,false),true);
+          assert.strictEqual(tripValidationRule('2026-09-07','2026-09-06',18,false),false);
+          console.log('production validation rule scenarios OK');
+          NODE
+          node /tmp/test-validation-rule.cjs
+          test "$(git hash-object .github/workflows/notifications.yml)" = "5723aac36d6641b2424b64cb59f51f9932b5bd20"
+      - name: Commit release and tag
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/promote-4.4.4.yml
+          git add app.js public-config.js service-worker.js
+          changed="$(git diff --cached --name-only | sort | tr '\n' ' ')"
+          test "$changed" = ".github/workflows/promote-4.4.4.yml app.js public-config.js service-worker.js "
+          git commit -m 'release: production 4.4.4'
+          git push origin main
+          if git rev-parse -q --verify refs/tags/v4.4.4 >/dev/null; then
+            echo 'Tag v4.4.4 already exists'
+            exit 1
+          fi
+          git tag -a v4.4.4 -m 'Production 4.4.4'
+          git push origin v4.4.4
