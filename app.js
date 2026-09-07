@@ -4,12 +4,12 @@ import {
   getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
 import {
-  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch,
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch, runTransaction,
   onSnapshot, serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 const ENV = globalThis.COVOIT_ENV || {};
 const firebaseConfig = ENV.firebaseConfig || {};
-const APP_VERSION = ENV.version || '4.4.4';
+const APP_VERSION = ENV.version || '4.5.0';
 const IS_TEST = ENV.environment === 'test';
 const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
@@ -48,6 +48,8 @@ let tripDaysReady = false;
 let legacyStatusReady = false;
 let appUiInitialized = false;
 let accessUiInitialized = false;
+let editingGroupId = null;
+let editingGroupDate = null;
 
 const $ = id => document.getElementById(id);
 const qsa = sel => [...document.querySelectorAll(sel)];
@@ -567,17 +569,22 @@ function renderGroups(){
   }
   if($('addGroup'))$('addGroup').disabled=false;
   const ds=$('groupDate').value||nextCarpoolISO();
-  const past=isPastDate(ds); const groups=currentPlan(ds); const assigned=new Set(groups.flatMap(g=>g.members));
+  const past=isPastDate(ds); const groups=currentPlan(ds);
+  const editing=(editingGroupDate===ds)?groups.find(g=>g.id===editingGroupId):null;
+  if(editingGroupDate===ds&&editingGroupId&&!editing){editingGroupId=null;editingGroupDate=null;}
+  const assigned=new Set(groups.filter(g=>!editing||g.id!==editing.id).flatMap(g=>g.members));
   const box=$('availablePeople');box.innerHTML='';
   PEOPLE.forEach(p=>{
-    const v=getAvail(ds,p),m=statusMeta(v); const can=!assigned.has(p) && (past || isAvailable(v));
+    const v=getAvail(ds,p),m=statusMeta(v),selectedForEdit=!!editing?.members?.includes(p);
+    const can=!assigned.has(p) && (selectedForEdit || past || isAvailable(v));
     const row=document.createElement('label');row.className='person-row';
-    const info=assigned.has(p)?'Déjà dans un groupe':(past?`${m.label} · saisie a posteriori`:m.label);
-    const checked=assigned.has(p)||can,disabled=assigned.has(p)||!can;
+    const info=assigned.has(p)?'Déjà dans un autre groupe':selectedForEdit?'Dans le groupe à modifier':(past?`${m.label} · saisie a posteriori`:m.label);
+    const checked=assigned.has(p)||selectedForEdit||(!editing&&can),disabled=assigned.has(p)||!can;
     row.innerHTML=`<input type="checkbox" class="group-check" value="${p}" ${checked?'checked':''} ${disabled?'disabled':''}><div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong><div class="small muted">${info}</div></div>`;
     box.appendChild(row);
   });
   box.querySelectorAll('.group-check').forEach(c=>c.addEventListener('change',()=>renderGroupCompatibilityMessage(ds)));
+  if($('addGroup'))$('addGroup').textContent=editing?'Enregistrer les modifications':'Ajouter le groupe sélectionné';
   renderGroupCompatibilityMessage(ds); renderDraftGroups(ds); renderValidatedInfo(ds);
 }
 function renderGroupCompatibilityMessage(ds){
@@ -607,7 +614,16 @@ async function addSelectedGroup(){
   const ds=$('groupDate').value;const members=qsa('.group-check:checked:not(:disabled)').map(x=>x.value);
   if(members.length<2||members.length>5){alert('Sélectionne entre 2 et 5 personnes.');return;}
   const bad=isPastDate(ds)?[]:explicitIncompatibilities(ds,members);if(bad.length){alert('Ce groupe contient une incompatibilité horaire explicite.');return;}
-  const sug=driverSuggestion(ds,members);const groups=[...currentPlan(ds),{id:crypto.randomUUID(),members:canonical(members),driver:sug.candidates[0]||canonical(members)[0]}];
+  const sug=driverSuggestion(ds,members),current=currentPlan(ds),editing=(editingGroupDate===ds)?current.find(g=>g.id===editingGroupId):null;
+  if(editing){
+    const driver=members.includes(editing.driver)?editing.driver:(sug.candidates[0]||canonical(members)[0]);
+    const groups=current.map(g=>g.id===editing.id?{...g,members:canonical(members),driver}:g);
+    const overlap=groupsHaveOverlap(groups);if(overlap){alert(`${label(overlap)} apparaît dans plusieurs groupes.`);return;}
+    editingGroupId=null;editingGroupDate=null;
+    await savePlan(ds,groups);toast('✓ Groupe modifié.');
+    return;
+  }
+  const groups=[...current,{id:crypto.randomUUID(),members:canonical(members),driver:sug.candidates[0]||canonical(members)[0]}];
   await savePlan(ds,groups);toast('Groupe ajouté.');
 }
 async function savePlan(date,groups){
@@ -622,37 +638,76 @@ function renderDraftGroups(ds){
   const validationMessage=$('validationMessage');
   if(!gs.length){
     box.innerHTML='<div class="empty">Aucun groupe prévu.</div>';
+    $('validateTrips').style.display='inline-flex';
     $('validateTrips').disabled=true;
     if(validationMessage){validationMessage.textContent='';delete validationMessage.dataset.validationGate;}
     return;
   }
-  const validationGate=tripValidationAvailability(ds);
+  const validationGate=tripValidationAvailability(ds),multi=gs.length>1;
+  $('validateTrips').style.display=multi?'none':'inline-flex';
   $('validateTrips').disabled=!validationGate.allowed;
   if(validationMessage){
     if(!validationGate.allowed){validationMessage.textContent=validationGate.message;validationMessage.dataset.validationGate='1';}
     else if(validationMessage.dataset.validationGate==='1'){validationMessage.textContent='';delete validationMessage.dataset.validationGate;}
   }
   gs.forEach((g,idx)=>{
-    const sug=driverSuggestion(ds,g.members),equal=sug.candidates.length>1;const div=document.createElement('div');div.className='group-card';
+    const sug=driverSuggestion(ds,g.members),equal=sug.candidates.length>1,vg=validatedGroupForPlan(ds,g),done=isPlannedGroupValidated(ds,g);
+    const action=done?'✓ Groupe validé':vg?'↻ Mettre à jour ce groupe':'✓ Valider ce groupe';const div=document.createElement('div');div.className='group-card';div.dataset.groupId=g.id;if(editingGroupDate===ds&&editingGroupId===g.id)div.classList.add('group-card-focus');
     div.innerHTML=`<div class="row" style="justify-content:space-between"><strong>Groupe ${idx+1} · ${sug.key}</strong><button class="btn danger smallbtn del-group" data-id="${g.id}">Supprimer</button></div>
       <div class="group-members">${canonical(g.members).map(p=>`<span class="member-chip">${label(p)}</span>`).join('')}</div>
       <div class="suggestion ${equal?'tie':''}">${equal?`⚖️ Égalité : ${sug.candidates.map(label).join(' / ')}`:`🚗 Conducteur conseillé : ${label(sug.candidates[0])}`}<div class="small">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div></div>
-      <div class="field"><label>Conducteur réel / prévu</label><select class="driver-select input" data-id="${g.id}">${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>`;
+      <div class="field"><label>Conducteur réel / prévu</label><select class="driver-select input" data-id="${g.id}">${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>
+      ${multi?`<div class="row" style="margin-top:8px"><button class="btn smallbtn validate-one-group" data-id="${g.id}" ${(done||!validationGate.allowed)?'disabled':''}>${action}</button></div>`:''}`;
     box.appendChild(div);
   });
-  box.querySelectorAll('.del-group').forEach(b=>b.addEventListener('click',async()=>{await savePlan(ds,currentPlan(ds).filter(g=>g.id!==b.dataset.id));toast('Groupe supprimé.');}));
+  box.querySelectorAll('.del-group').forEach(b=>b.addEventListener('click',async()=>{if(editingGroupDate===ds&&editingGroupId===b.dataset.id){editingGroupId=null;editingGroupDate=null;}await savePlan(ds,currentPlan(ds).filter(g=>g.id!==b.dataset.id));toast('Groupe supprimé.');}));
   box.querySelectorAll('.driver-select').forEach(s=>s.addEventListener('change',async()=>{const gs=currentPlan(ds).map(g=>g.id===s.dataset.id?{...g,driver:s.value}:g);await savePlan(ds,gs);toast('Conducteur modifié.');}));
+  box.querySelectorAll('.validate-one-group').forEach(b=>b.addEventListener('click',async()=>{const planned=currentPlan(ds),g=planned.find(x=>x.id===b.dataset.id);if(!g)return;b.disabled=true;b.textContent='Enregistrement…';try{await validateSingleGroupForDate(ds,g,planned);}catch(e){alert(friendlyError(e));renderGroups();}}));
 }
 function groupsHaveOverlap(groups){
-  const seen=new Set();for(const g of groups){for(const p of g.members){if(seen.has(p))return p;seen.add(p);}}return null;
+  const seen=new Set();for(const g of groups){for(const p of (g.members||g.participants||[])){if(seen.has(p))return p;seen.add(p);}}return null;
+}
+function groupMembersKey(g){return canonical(g?.members||g?.participants||[]).join('|');}
+function validatedGroupForPlan(ds,g){const key=groupMembersKey(g);return tripGroupsForDate(ds).find(v=>groupMembersKey(v)===key)||null;}
+function isPlannedGroupValidated(ds,g){const v=validatedGroupForPlan(ds,g);return !!v&&(v.driver||v.driverId)===(g.driver||g.driverId);}
+async function validateSingleGroupForDate(ds,g,planGroups=[]){
+  const validationGate=tripValidationAvailability(ds);
+  if(!validationGate.allowed)throw new Error(validationGate.message);
+  const members=canonical(g?.members||g?.participants||[]),driver=g?.driver||g?.driverId;
+  if(members.length<2||!members.includes(driver))throw new Error('Ce groupe est invalide.');
+  if(!isPastDate(ds)){
+    if(explicitIncompatibilities(ds,members).length)throw new Error('Ce groupe contient une incompatibilité horaire.');
+    if(unknownCompatibilities(ds,members).length)throw new Error('Une ou plusieurs réponses aux impératifs sont encore attendues pour ce groupe.');
+  }
+  const normalizedPlan=(planGroups.length?planGroups:currentPlan(ds)).map(x=>({id:x.id||crypto.randomUUID(),members:canonical(x.members||x.participants||[]),driver:x.driver||x.driverId}));
+  const normalizedGroup={id:g.id||crypto.randomUUID(),members,driver,source:IS_TEST?'test':'app'};
+  const tripRef=doc(db,'tripDays',ds),planRef=doc(db,'plans',ds);let merged=[];
+  await runTransaction(db,async tx=>{
+    const snap=await tx.get(tripRef),existing=snap.exists()?(snap.data().groups||[]):[];
+    const key=groupMembersKey(normalizedGroup);
+    const remaining=existing.filter(x=>!((normalizedGroup.id&&x.id===normalizedGroup.id)||groupMembersKey(x)===key));
+    const overlap=groupsHaveOverlap([...remaining,normalizedGroup]);
+    if(overlap)throw new Error(`${label(overlap)} apparaît déjà dans un autre groupe validé.`);
+    merged=[...remaining,normalizedGroup];
+    const complete=normalizedPlan.length>0&&normalizedPlan.every(pg=>merged.some(v=>groupMembersKey(v)===groupMembersKey(pg)&&(v.driver||v.driverId)===pg.driver));
+    tx.set(tripRef,{date:ds,groups:merged,source:IS_TEST?'test':'app',updatedAt:serverTimestamp(),updatedBy:profileId},{merge:true});
+    tx.set(planRef,{date:ds,groups:normalizedPlan,validatedAt:complete?serverTimestamp():null,updatedAt:serverTimestamp(),updatedBy:profileId},{merge:true});
+  });
+  tripDays.set(ds,{date:ds,groups:merged,source:IS_TEST?'test':'app',updatedBy:profileId});
+  plans.set(ds,{date:ds,groups:normalizedPlan,updatedBy:profileId});
+  if(activePage('tomorrow'))renderTomorrow();if(activePage('groups')){renderGroups();renderValidatedInfo(ds);}if(activePage('history')){renderSummary();renderHistory();}
+  toast(`✓ Groupe ${members.map(label).join(' · ')} enregistré`);
 }
 async function validateTrips(){
-  const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;try{await validateGroupsForDate(ds,groups);$('validationMessage').textContent=`${groups.length} trajet(s) validé(s) pour ${fmtDate(ds)}.`;}catch(e){alert(friendlyError(e));}
+  const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;
+  if(groups.length>1){$('validationMessage').textContent='Valide chaque groupe séparément avec son bouton.';return;}
+  try{await validateGroupsForDate(ds,groups);$('validationMessage').textContent=`${groups.length} trajet(s) validé(s) pour ${fmtDate(ds)}.`;}catch(e){alert(friendlyError(e));}
 }
 function renderValidatedInfo(ds){
   const groups=tripGroupsForDate(ds),box=$('validatedTodayInfo');
   if(!groups.length){box.innerHTML='';return;}
-  box.innerHTML=`<div class="notice oknotice"><strong>${groups.length} trajet(s) déjà validé(s)</strong><div class="small">Valider de nouveau remplacera les groupes de cette date, ce qui évite les doublons.</div></div>`;
+  const note=currentPlan(ds).length>1?'Chaque groupe peut être validé ou mis à jour indépendamment.':'Valider de nouveau met à jour le trajet de cette date sans créer de doublon.';
+  box.innerHTML=`<div class="notice oknotice"><strong>${groups.length} trajet(s) déjà validé(s)</strong><div class="small">${note}</div></div>`;
 }
 function loadValidatedIntoPlan(date){
   const groups=tripGroupsForDate(date).map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members||g.participants||[]),driver:g.driver||g.driverId}));
@@ -901,8 +956,29 @@ function proposalForDate(date){
 function normalizedGroupSignature(groups){return groups.map(g=>`${canonical(g.members||g.participants||[]).join('|')}>${g.driver||g.driverId||''}`).sort().join('||');}
 function validatedSummaryHTML(ds){
   const groups=tripGroupsForDate(ds); if(!groups.length)return '';
+  const planned=currentPlan(ds),partial=planned.length>1&&groups.length<planned.length,title=partial?`✓ ${groups.length}/${planned.length} groupe(s) validé(s)`:'✓ Covoiturage validé';
   const lines=groups.map((g,i)=>{const members=canonical(g.members||g.participants||[]),driver=g.driver||g.driverId,passengers=members.filter(p=>p!==driver);return `<div class="validated-line"><span>${groups.length>1?`<strong>Groupe ${i+1} · </strong>`:''}🚗 <strong>${label(driver)}</strong>${passengers.length?` · Passagers : ${passengers.map(label).join(', ')}`:''}</span></div>`;}).join('');
-  return `<div class="validated-summary"><div class="validated-title">✓ Covoiturage validé</div>${lines}</div>`;
+  return `<div class="validated-summary"><div class="validated-title">${title}</div>${lines}</div>`;
+}
+async function openGroupEditor(ds,groupId){
+  let proposal=proposalForDate(ds);
+  if(proposal.groups.length&&!proposal.saved){
+    await savePlan(ds,proposal.groups);
+    proposal=proposalForDate(ds);
+  }
+  const target=proposal.groups.find(g=>g.id===groupId)||proposal.groups.find(g=>groupCode(g.members)===String(groupId||'').replace('auto-',''));
+  editingGroupId=target?.id||groupId;editingGroupDate=ds;
+  $('groupDate').value=ds;
+  openPage('groups');
+  renderGroups();
+  const id=target?.id||groupId;
+  setTimeout(()=>{
+    const card=[...document.querySelectorAll('#draftGroups .group-card')].find(el=>el.dataset.groupId===id);
+    if(!card)return;
+    card.classList.add('group-card-focus');
+    card.scrollIntoView({behavior:'smooth',block:'center'});
+    setTimeout(()=>card.classList.remove('group-card-focus'),2200);
+  },80);
 }
 function renderQuickProposal(ds){
   const box=$('quickProposal'); if(!box)return;
@@ -912,11 +988,12 @@ function renderQuickProposal(ds){
   const sameAsValidated=validated.length>0 && normalizedGroupSignature(gs)===normalizedGroupSignature(validated);
   const validationGate=tripValidationAvailability(ds);
   const groupsHtml=gs.length?gs.map((g,i)=>{
-    const sug=driverSuggestion(ds,g.members),suggested=sug.candidates.length>1?`Égalité : ${sug.candidates.map(label).join(' / ')}`:`Suggéré : ${label(sug.candidates[0])}`;
+    const sug=driverSuggestion(ds,g.members),suggested=sug.candidates.length>1?`Égalité : ${sug.candidates.map(label).join(' / ')}`:`Suggéré : ${label(sug.candidates[0])}`,vg=validatedGroupForPlan(ds,g),done=isPlannedGroupValidated(ds,g),action=done?'✓ Groupe validé':vg?'↻ Mettre à jour':'✓ Valider ce groupe';
     return `<div class="proposal-group-simple ${i?'with-separator':''}">
       <div class="proposal-main-line"><strong>${gs.length>1?`Groupe ${i+1} · `:''}${g.members.map(label).join(' · ')}</strong><span class="proposal-suggested">${suggested}</span></div>
       <div class="proposal-counter-line">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div>
       <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}" ${proposal.pending&&!proposal.saved?'disabled':''}>${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>
+      ${gs.length>1?`<div class="quick-group-actions"><button class="btn smallbtn quick-validate-one" data-id="${g.id}" ${(done||proposal.pending||!validationGate.allowed)?'disabled':''}>${action}</button><button class="btn secondary smallbtn quick-modify-one" data-id="${g.id}" type="button">Modifier ce groupe</button></div>`:''}
     </div>`;
   }).join(''):'<div class="empty compact-empty">Aucun groupe confirmé pour l’instant.</div>';
   const rejectedHtml=proposal.rejected?.length?proposal.rejected.map(x=>`<div>❌ ${label(x.responder)} ne peut pas partir avec ${label(x.owner)} · ${timeLabel(x.time)}</div>`).join(''):'';
@@ -930,8 +1007,10 @@ function renderQuickProposal(ds){
     const savePromise=savePlan(ds,current); const state=$('quickSaveState'); if(state)state.textContent='Enregistrement du conducteur…';
     savePromise.then(()=>{const st=$('quickSaveState');if(st)st.textContent='✓ Conducteur enregistré';}).catch(e=>alert(friendlyError(e)));
   }));
-  const validateBtn=$('quickValidate'); if(validateBtn&&!sameAsValidated&&!proposal.pending&&validationGate.allowed)validateBtn.addEventListener('click',async()=>{validateBtn.disabled=true;validateBtn.textContent='Enregistrement…';const state=$('quickSaveState');if(state)state.textContent='Validation du covoiturage…';try{await validateGroupsForDate(ds,proposalForDate(ds).groups);renderTomorrow();}catch(e){alert(friendlyError(e));renderTomorrow();}});
-  $('quickModify').addEventListener('click',()=>{$('groupDate').value=ds;openPage('groups');renderGroups();});
+  box.querySelectorAll('.quick-validate-one').forEach(btn=>btn.addEventListener('click',async()=>{const current=proposalForDate(ds).groups.map(g=>({...g}));const target=current.find(g=>g.id===btn.dataset.id)||current.find(g=>groupCode(g.members)===btn.dataset.id.replace('auto-',''));if(!target)return;btn.disabled=true;btn.textContent='Enregistrement…';const state=$('quickSaveState');if(state)state.textContent='Validation de ce groupe…';try{await validateSingleGroupForDate(ds,target,current);renderTomorrow();}catch(e){alert(friendlyError(e));renderTomorrow();}}));
+  box.querySelectorAll('.quick-modify-one').forEach(btn=>btn.addEventListener('click',async()=>{btn.disabled=true;const state=$('quickSaveState');if(state)state.textContent='Ouverture de ce groupe…';try{await openGroupEditor(ds,btn.dataset.id);}catch(e){btn.disabled=false;alert(friendlyError(e));}}));
+  const validateBtn=$('quickValidate');if(validateBtn&&gs.length>1)validateBtn.style.display='none';if(validateBtn&&gs.length===1&&!sameAsValidated&&!proposal.pending&&validationGate.allowed)validateBtn.addEventListener('click',async()=>{validateBtn.disabled=true;validateBtn.textContent='Enregistrement…';const state=$('quickSaveState');if(state)state.textContent='Validation du covoiturage…';try{await validateGroupsForDate(ds,proposalForDate(ds).groups);renderTomorrow();}catch(e){alert(friendlyError(e));renderTomorrow();}});
+  const modifyBtn=$('quickModify');if(modifyBtn&&gs.length>1)modifyBtn.style.display='none';else if(modifyBtn)modifyBtn.addEventListener('click',async()=>{try{await openGroupEditor(ds,gs[0]?.id);}catch(e){alert(friendlyError(e));}});
   const resetBtn=$('quickResetTest');if(resetBtn)resetBtn.addEventListener('click',()=>resetTestTrip(ds));
 }
 

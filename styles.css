@@ -259,3 +259,10 @@ html[data-theme="dark"] .coffee-icon-btn{background:#151b22;color:var(--ink)}
 .unvalidated-trip-notice{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0 2px}
 .unvalidated-trip-notice .small{margin-top:2px}
 @media(max-width:520px){.unvalidated-trip-notice{align-items:flex-start}.unvalidated-trip-notice .btn{flex:0 0 auto}}
+
+
+/* 4.5.0 — actions indépendantes par groupe */
+.quick-group-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.quick-group-actions .btn{flex:1 1 145px}
+.group-card-focus{outline:3px solid var(--brand);outline-offset:2px;box-shadow:0 0 0 5px color-mix(in srgb,var(--brand) 12%,transparent)}
+@media(max-width:620px){.quick-group-actions{gap:6px}.quick-group-actions .btn{font-size:11.5px;min-height:38px;padding:8px 7px}}
