@@ -1,0 +1,30 @@
+name: Prepare binome repair tool
+on:
+  push:
+    paths:
+      - '.github/workflows/prepare-binome-repair.yml'
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Copy validated repair tool from TEST
+        run: |
+          curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/wm2800im/team-tool-test/2679f60592a665dcc893db0b459ba20d7c166c27/repair-binomes.html \
+            --output repair-binomes.html
+          grep -Fq 'Réparation des binômes' repair-binomes.html
+          grep -Fq "END_SHEET='2026_08'" repair-binomes.html
+          grep -Fq 'const EXPECTED=' repair-binomes.html
+      - name: Commit prepared tool
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/prepare-binome-repair.yml
+          git add repair-binomes.html
+          git commit -m 'chore(prod): prepare binome repair tool'
+          git push origin main
