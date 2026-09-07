@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Réparation des binômes — Covoiturage</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--ink:#17212b;--muted:#667085;--line:#dfe5ec;--brand:#203a5f;--ok:#16794b;--warn:#a66100;--danger:#b42318}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+main{max-width:1040px;margin:24px auto;padding:0 14px 40px}h1{font-size:25px;margin:0 0 5px}h2{font-size:17px;margin:0 0 10px}.muted{color:var(--muted)}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}.badge{display:inline-block;padding:5px 9px;border-radius:999px;font-weight:800;background:#eef3f8;color:var(--brand)}.badge.prod{background:#fff0ef;color:var(--danger)}.badge.test{background:#f3eaff;color:#6a1fa1}.notice{padding:11px 12px;border-radius:10px;background:#fff8eb;border-left:4px solid var(--warn);margin:10px 0}.notice.ok{background:#eefaf4;border-left-color:var(--ok)}.notice.danger{background:#fff0ef;border-left-color:var(--danger)}button{border:0;border-radius:10px;padding:10px 13px;font-weight:800;cursor:pointer;background:var(--brand);color:#fff}button.secondary{background:#eef3f8;color:var(--brand)}button.danger{background:var(--danger)}button:disabled{opacity:.45;cursor:not-allowed}input{border:1px solid var(--line);border-radius:9px;padding:9px 10px;font:inherit}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}th{background:#f8fafc;position:sticky;top:0}.scroll{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:10px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.kpi{padding:12px;border-radius:11px;background:#f8fafc;border:1px solid var(--line)}.kpi strong{display:block;font-size:23px;color:var(--brand)}code{background:#eef3f8;padding:2px 5px;border-radius:5px}@media(max-width:720px){.kpis{grid-template-columns:1fr 1fr}}
+</style>
+<script src="./public-config.js"></script>
+</head>
+<body><main>
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <div><h1>Réparation des binômes</h1><div class="muted">Outil ponctuel — ne modifie ni les trinômes, ni les quadrinômes, ni les groupes de cinq.</div></div>
+    <span id="envBadge" class="badge">…</span>
+  </div>
+  <div id="identity" class="notice">Vérification de l'identité Igor…</div>
+</div>
+
+<div class="card">
+  <h2>Ce que fait cette correction</h2>
+  <div class="notice">
+    1) elle supprime les anciens binômes importés des feuilles antérieures à <strong>2024_01</strong> ;<br>
+    2) elle reconstruit exactement les binômes de <strong>2024_01 à 2026_08</strong> à partir des 145 occurrences validées dans l'Excel ;<br>
+    3) elle conserve les trajets saisis dans l'application et tout ce qui est postérieur à août 2026 ;<br>
+    4) elle laisse entièrement intacts les groupes de 3, 4 et 5.
+  </div>
+  <div class="muted">La correction est idempotente : la relancer produit le même résultat. Une sauvegarde JSON est téléchargée avant toute écriture.</div>
+</div>
+
+<div class="card">
+  <div class="row"><button id="previewBtn" disabled>1. Analyser la base</button><button id="backupBtn" class="secondary" disabled>Télécharger la sauvegarde</button></div>
+  <div id="summary" style="margin-top:12px"></div>
+</div>
+
+<div class="card">
+  <h2>Référence validée des binômes — 2024_01 à 2026_08</h2>
+  <div class="scroll"><table><thead><tr><th>Binôme</th><th>Code 1</th><th>Nb</th><th>Code 2</th><th>Nb</th><th>Total</th></tr></thead><tbody>
+  <tr><td>A–E</td><td>AE</td><td>6</td><td>EA</td><td>5</td><td>11</td></tr><tr><td>A–I</td><td>AI</td><td>9</td><td>IA</td><td>10</td><td>19</td></tr><tr><td>A–L</td><td>AL</td><td>4</td><td>LA</td><td>4</td><td>8</td></tr><tr><td>A–S</td><td>AS</td><td>11</td><td>SA</td><td>14</td><td>25</td></tr><tr><td>E–I</td><td>EI</td><td>9</td><td>IE</td><td>8</td><td>17</td></tr><tr><td>E–L</td><td>EL</td><td>0</td><td>LE</td><td>0</td><td>0</td></tr><tr><td>E–S</td><td>ES</td><td>6</td><td>SE</td><td>5</td><td>11</td></tr><tr><td>I–L</td><td>IL</td><td>7</td><td>LI</td><td>7</td><td>14</td></tr><tr><td>I–S</td><td>IS</td><td>17</td><td>SI</td><td>17</td><td>34</td></tr><tr><td>L–S</td><td>LS</td><td>3</td><td>SL</td><td>3</td><td>6</td></tr>
+  </tbody></table></div>
+</div>
+
+<div class="card">
+  <h2>2. Appliquer la correction</h2>
+  <p class="muted">À faire uniquement après avoir contrôlé l'aperçu ci-dessus.</p>
+  <div class="row"><label>Confirmation : <input id="confirmText" placeholder="TEST ou PROD" autocomplete="off"></label><button id="applyBtn" class="danger" disabled>Appliquer la correction</button></div>
+  <div id="result" style="margin-top:12px"></div>
+</div>
+
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js';
+import { getAuth, onAuthStateChanged, setPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
+import { getFirestore, collection, getDocs, doc, getDoc, writeBatch, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
+
+const ENV=globalThis.COVOIT_ENV||{};
+const EXPECTED=[{"date":"2024-01-19","members":["etienne","stephane"],"driver":"etienne","code":"ES","sourceSheet":"2024_01","sourceCell":"A19","raw":"ES","id":"PAIRFIX-20240119-ES-001"},{"date":"2024-02-09","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2024_02","sourceCell":"A14","raw":"SA","id":"PAIRFIX-20240209-SA-002"},{"date":"2024-02-14","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_02","sourceCell":"A17","raw":"SI","id":"PAIRFIX-20240214-SI-003"},{"date":"2024-02-20","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2024_02","sourceCell":"A21","raw":"AI","id":"PAIRFIX-20240220-AI-004"},{"date":"2024-02-22","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2024_02","sourceCell":"A23","raw":"EI","id":"PAIRFIX-20240222-EI-005"},{"date":"2024-02-23","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2024_02","sourceCell":"A24","raw":"IE","id":"PAIRFIX-20240223-IE-006"},{"date":"2024-02-27","members":["aurelien","etienne"],"driver":"etienne","code":"EA","sourceSheet":"2024_02","sourceCell":"A26","raw":"EA","id":"PAIRFIX-20240227-EA-007"},{"date":"2024-03-01","members":["aurelien","etienne"],"driver":"aurelien","code":"AE","sourceSheet":"2024_03","sourceCell":"A9","raw":"1 AE","id":"PAIRFIX-20240301-AE-008"},{"date":"2024-03-14","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2024_03","sourceCell":"A18","raw":"IA SE","id":"PAIRFIX-20240314-IA-009"},{"date":"2024-03-14","members":["etienne","stephane"],"driver":"stephane","code":"SE","sourceSheet":"2024_03","sourceCell":"A18","raw":"IA SE","id":"PAIRFIX-20240314-SE-010"},{"date":"2024-03-19","members":["etienne","stephane"],"driver":"etienne","code":"ES","sourceSheet":"2024_03","sourceCell":"A21","raw":"ES","id":"PAIRFIX-20240319-ES-011"},{"date":"2024-03-21","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_03","sourceCell":"A23","raw":"IS","id":"PAIRFIX-20240321-IS-012"},{"date":"2024-03-27","members":["etienne","stephane"],"driver":"stephane","code":"SE","sourceSheet":"2024_03","sourceCell":"A27","raw":"SE","id":"PAIRFIX-20240327-SE-013"},{"date":"2024-04-02","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2024_04","sourceCell":"A6","raw":"EI","id":"PAIRFIX-20240402-EI-014"},{"date":"2024-04-10","members":["ludo","stephane"],"driver":"stephane","code":"SL","sourceSheet":"2024_04","sourceCell":"A12","raw":"SL","id":"PAIRFIX-20240410-SL-015"},{"date":"2024-04-12","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_04","sourceCell":"A14","raw":"SI","id":"PAIRFIX-20240412-SI-016"},{"date":"2024-04-16","members":["etienne","stephane"],"driver":"etienne","code":"ES","sourceSheet":"2024_04","sourceCell":"A16","raw":"ES","id":"PAIRFIX-20240416-ES-017"},{"date":"2024-04-17","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2024_04","sourceCell":"A17","raw":"IE","id":"PAIRFIX-20240417-IE-018"},{"date":"2024-04-19","members":["etienne","stephane"],"driver":"stephane","code":"SE","sourceSheet":"2024_04","sourceCell":"A19","raw":"SE","id":"PAIRFIX-20240419-SE-019"},{"date":"2024-04-26","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2024_04","sourceCell":"A24","raw":"IA","id":"PAIRFIX-20240426-IA-020"},{"date":"2024-04-30","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_04","sourceCell":"A26","raw":"IS","id":"PAIRFIX-20240430-IS-021"},{"date":"2024-05-02","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2024_05","sourceCell":"A8","raw":"AI","id":"PAIRFIX-20240502-AI-022"},{"date":"2024-05-03","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2024_05","sourceCell":"A9","raw":"AS","id":"PAIRFIX-20240503-AS-023"},{"date":"2024-05-08","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2024_05","sourceCell":"A12","raw":"SA","id":"PAIRFIX-20240508-SA-024"},{"date":"2024-05-13","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_05","sourceCell":"A15","raw":"13 SI","id":"PAIRFIX-20240513-SI-025"},{"date":"2024-05-22","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2024_05","sourceCell":"A22","raw":"SA","id":"PAIRFIX-20240522-SA-026"},{"date":"2024-05-23","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2024_05","sourceCell":"A23","raw":"AS","id":"PAIRFIX-20240523-AS-027"},{"date":"2024-05-24","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_05","sourceCell":"A24","raw":"IS","id":"PAIRFIX-20240524-IS-028"},{"date":"2024-05-27","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_05","sourceCell":"A25","raw":"27 SI","id":"PAIRFIX-20240527-SI-029"},{"date":"2024-06-07","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2024_06","sourceCell":"A9","raw":"IE","id":"PAIRFIX-20240607-IE-030"},{"date":"2024-06-14","members":["aurelien","etienne"],"driver":"aurelien","code":"AE","sourceSheet":"2024_06","sourceCell":"A14","raw":"AE","id":"PAIRFIX-20240614-AE-031"},{"date":"2024-06-21","members":["aurelien","etienne"],"driver":"aurelien","code":"AE","sourceSheet":"2024_06","sourceCell":"A19","raw":"AE","id":"PAIRFIX-20240621-AE-032"},{"date":"2024-07-30","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_08","sourceCell":"A6","raw":"IS","id":"PAIRFIX-20240730-IS-033"},{"date":"2024-07-31","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_08","sourceCell":"A7","raw":"SI","id":"PAIRFIX-20240731-SI-034"},{"date":"2024-08-02","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2024_08","sourceCell":"A9","raw":"EI","id":"PAIRFIX-20240802-EI-035"},{"date":"2024-08-07","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2024_08","sourceCell":"A12","raw":"IA","id":"PAIRFIX-20240807-IA-036"},{"date":"2024-08-16","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2024_08","sourceCell":"A19","raw":"IA","id":"PAIRFIX-20240816-IA-037"},{"date":"2024-10-01","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2024_10","sourceCell":"A6","raw":"1 IL","id":"PAIRFIX-20241001-IL-038"},{"date":"2024-10-04","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2024_10","sourceCell":"A9","raw":"IE","id":"PAIRFIX-20241004-IE-039"},{"date":"2024-10-08","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2024_10","sourceCell":"A11","raw":"AI","id":"PAIRFIX-20241008-AI-040"},{"date":"2024-10-14","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2024_10","sourceCell":"A15","raw":"14 IA","id":"PAIRFIX-20241014-IA-041"},{"date":"2024-10-18","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_10","sourceCell":"A19","raw":"IS","id":"PAIRFIX-20241018-IS-042"},{"date":"2024-10-21","members":["aurelien","etienne"],"driver":"etienne","code":"EA","sourceSheet":"2024_10","sourceCell":"A20","raw":"21 EA","id":"PAIRFIX-20241021-EA-043"},{"date":"2024-10-24","members":["aurelien","etienne"],"driver":"aurelien","code":"AE","sourceSheet":"2024_10","sourceCell":"A23","raw":"AE","id":"PAIRFIX-20241024-AE-044"},{"date":"2024-10-28","members":["etienne","stephane"],"driver":"etienne","code":"ES","sourceSheet":"2024_10","sourceCell":"A25","raw":"28 ES","id":"PAIRFIX-20241028-ES-045"},{"date":"2024-10-31","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2024_10","sourceCell":"A28","raw":"31 LI","id":"PAIRFIX-20241031-LI-046"},{"date":"2024-11-05","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_11","sourceCell":"A11","raw":"SI","id":"PAIRFIX-20241105-SI-047"},{"date":"2024-11-06","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2024_11","sourceCell":"A12","raw":"AI","id":"PAIRFIX-20241106-AI-048"},{"date":"2024-11-08","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2024_11","sourceCell":"A14","raw":"IL","id":"PAIRFIX-20241108-IL-049"},{"date":"2024-11-15","members":["aurelien","etienne"],"driver":"etienne","code":"EA","sourceSheet":"2024_11","sourceCell":"A19","raw":"EA","id":"PAIRFIX-20241115-EA-050"},{"date":"2024-11-18","members":["aurelien","etienne"],"driver":"aurelien","code":"AE","sourceSheet":"2024_11","sourceCell":"A20","raw":"18 AE","id":"PAIRFIX-20241118-AE-051"},{"date":"2024-11-19","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_11","sourceCell":"A21","raw":"IS","id":"PAIRFIX-20241119-IS-052"},{"date":"2024-11-28","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2024_11","sourceCell":"A28","raw":"IA","id":"PAIRFIX-20241128-IA-053"},{"date":"2024-09-09","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_09","sourceCell":"A10","raw":"9 IS","id":"PAIRFIX-20240909-IS-054"},{"date":"2024-09-16","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2024_09","sourceCell":"A15","raw":"16 EI","id":"PAIRFIX-20240916-EI-055"},{"date":"2024-09-24","members":["aurelien","etienne"],"driver":"etienne","code":"EA","sourceSheet":"2024_09","sourceCell":"A21","raw":"EA","id":"PAIRFIX-20240924-EA-056"},{"date":"2024-09-26","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2024_09","sourceCell":"A23","raw":"LI","id":"PAIRFIX-20240926-LI-057"},{"date":"2024-12-05","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2024_12","sourceCell":"A9","raw":"IS","id":"PAIRFIX-20241205-IS-058"},{"date":"2024-12-10","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2024_12","sourceCell":"A12","raw":"AS","id":"PAIRFIX-20241210-AS-059"},{"date":"2024-12-11","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2024_12","sourceCell":"A13","raw":"SA","id":"PAIRFIX-20241211-SA-060"},{"date":"2024-12-18","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2024_12","sourceCell":"A18","raw":"SI","id":"PAIRFIX-20241218-SI-061"},{"date":"2025-01-09","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2025_01","sourceCell":"A13","raw":"AI","id":"PAIRFIX-20250109-AI-062"},{"date":"2025-01-10","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2025_01","sourceCell":"A14","raw":"IA","id":"PAIRFIX-20250110-IA-063"},{"date":"2025-01-21","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_01","sourceCell":"A21","raw":"IS","id":"PAIRFIX-20250121-IS-064"},{"date":"2025-01-22","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2025_01","sourceCell":"A22","raw":"SI","id":"PAIRFIX-20250122-SI-065"},{"date":"2025-01-23","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_01","sourceCell":"A23","raw":"AS","id":"PAIRFIX-20250123-AS-066"},{"date":"2025-01-27","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_01","sourceCell":"A25","raw":"SA","id":"PAIRFIX-20250127-SA-067"},{"date":"2025-02-04","members":["ludo","stephane"],"driver":"stephane","code":"SL","sourceSheet":"2025_02","sourceCell":"A7","raw":"SL","id":"PAIRFIX-20250204-SL-068"},{"date":"2025-02-11","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2025_02","sourceCell":"A12","raw":"LI","id":"PAIRFIX-20250211-LI-069"},{"date":"2025-02-18","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2025_02","sourceCell":"A17","raw":"IL","id":"PAIRFIX-20250218-IL-070"},{"date":"2025-02-28","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2025_02","sourceCell":"A25","raw":"SI","id":"PAIRFIX-20250228-SI-071"},{"date":"2025-03-05","members":["aurelien","ludo"],"driver":"aurelien","code":"AL","sourceSheet":"2025_03","sourceCell":"A10","raw":"AL","id":"PAIRFIX-20250305-AL-072"},{"date":"2025-03-07","members":["aurelien","ludo"],"driver":"ludo","code":"LA","sourceSheet":"2025_03","sourceCell":"A12","raw":"LA","id":"PAIRFIX-20250307-LA-073"},{"date":"2025-03-14","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_03","sourceCell":"A17","raw":"AS","id":"PAIRFIX-20250314-AS-074"},{"date":"2025-03-21","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_03","sourceCell":"A22","raw":"SA","id":"PAIRFIX-20250321-SA-075"},{"date":"2025-03-28","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_03","sourceCell":"A27","raw":"IS","id":"PAIRFIX-20250328-IS-076"},{"date":"2025-04-01","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2025_04","sourceCell":"A6","raw":"SI","id":"PAIRFIX-20250401-SI-077"},{"date":"2025-04-08","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_04","sourceCell":"A11","raw":"SA","id":"PAIRFIX-20250408-SA-078"},{"date":"2025-04-09","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_04","sourceCell":"A12","raw":"AS","id":"PAIRFIX-20250409-AS-079"},{"date":"2025-04-10","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_04","sourceCell":"A13","raw":"IS","id":"PAIRFIX-20250410-IS-080"},{"date":"2025-04-25","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2025_04","sourceCell":"A24","raw":"SI","id":"PAIRFIX-20250425-SI-081"},{"date":"2025-05-02","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_05","sourceCell":"A9","raw":"SA","id":"PAIRFIX-20250502-SA-082"},{"date":"2025-05-05","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_05","sourceCell":"A10","raw":"AS","id":"PAIRFIX-20250505-AS-083"},{"date":"2025-05-12","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_05","sourceCell":"A15","raw":"IS","id":"PAIRFIX-20250512-IS-084"},{"date":"2025-05-29","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2025_05","sourceCell":"A28","raw":"IL","id":"PAIRFIX-20250529-IL-085"},{"date":"2025-06-05","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2025_06","sourceCell":"A8","raw":"SI","id":"PAIRFIX-20250605-SI-086"},{"date":"2025-06-06","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_06","sourceCell":"A9","raw":"AS","id":"PAIRFIX-20250606-AS-087"},{"date":"2025-06-10","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2025_06","sourceCell":"A11","raw":"LI SA","id":"PAIRFIX-20250610-LI-088"},{"date":"2025-06-10","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_06","sourceCell":"A11","raw":"LI SA","id":"PAIRFIX-20250610-SA-089"},{"date":"2025-06-20","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_06","sourceCell":"A19","raw":"SA","id":"PAIRFIX-20250620-SA-090"},{"date":"2025-06-23","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2025_06","sourceCell":"A20","raw":"EI","id":"PAIRFIX-20250623-EI-091"},{"date":"2025-07-02","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2025_07","sourceCell":"A7","raw":"AI","id":"PAIRFIX-20250702-AI-092"},{"date":"2025-07-03","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2025_07","sourceCell":"A8","raw":"IA","id":"PAIRFIX-20250703-IA-093"},{"date":"2025-07-10","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_07","sourceCell":"A13","raw":"IS","id":"PAIRFIX-20250710-IS-094"},{"date":"2025-08-04","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_08","sourceCell":"A5","raw":"SA","id":"PAIRFIX-20250804-SA-095"},{"date":"2025-09-11","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_09","sourceCell":"A13","raw":"AS","id":"PAIRFIX-20250911-AS-096"},{"date":"2025-09-26","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_09","sourceCell":"A24","raw":"AS","id":"PAIRFIX-20250926-AS-097"},{"date":"2025-10-03","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_10","sourceCell":"A9","raw":"IS","id":"PAIRFIX-20251003-IS-098"},{"date":"2025-10-08","members":["etienne","stephane"],"driver":"etienne","code":"ES","sourceSheet":"2025_10","sourceCell":"A12","raw":"ES","id":"PAIRFIX-20251008-ES-099"},{"date":"2025-10-09","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2025_10","sourceCell":"A13","raw":"SI","id":"PAIRFIX-20251009-SI-100"},{"date":"2025-10-13","members":["etienne","stephane"],"driver":"stephane","code":"SE","sourceSheet":"2025_10","sourceCell":"A15","raw":"13   SE","id":"PAIRFIX-20251013-SE-101"},{"date":"2025-10-21","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2025_10","sourceCell":"A21","raw":"EI","id":"PAIRFIX-20251021-EI-102"},{"date":"2025-10-22","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2025_10","sourceCell":"A22","raw":"IE","id":"PAIRFIX-20251022-IE-103"},{"date":"2025-10-23","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2025_10","sourceCell":"A23","raw":"IE","id":"PAIRFIX-20251023-IE-104"},{"date":"2025-10-24","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2025_10","sourceCell":"A24","raw":"EI","id":"PAIRFIX-20251024-EI-105"},{"date":"2025-11-07","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2025_11","sourceCell":"A9","raw":"SA","id":"PAIRFIX-20251107-SA-106"},{"date":"2025-11-12","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2025_11","sourceCell":"A12","raw":"AS","id":"PAIRFIX-20251112-AS-107"},{"date":"2025-11-18","members":["aurelien","ludo"],"driver":"ludo","code":"LA","sourceSheet":"2025_11","sourceCell":"A16","raw":"LA","id":"PAIRFIX-20251118-LA-108"},{"date":"2025-11-19","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2025_11","sourceCell":"A17","raw":"IS","id":"PAIRFIX-20251119-IS-109"},{"date":"2025-11-24","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2025_11","sourceCell":"A20","raw":"24 IL","id":"PAIRFIX-20251124-IL-110"},{"date":"2026-01-01","members":["aurelien","ludo"],"driver":"ludo","code":"LA","sourceSheet":"2026_01","sourceCell":"A8","raw":"LA 2","id":"PAIRFIX-20260101-LA-111"},{"date":"2026-01-14","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2026_01","sourceCell":"A17","raw":"SI","id":"PAIRFIX-20260114-SI-112"},{"date":"2026-01-23","members":["aurelien","ludo"],"driver":"aurelien","code":"AL","sourceSheet":"2026_01","sourceCell":"A24","raw":"AL1","id":"PAIRFIX-20260123-AL-113"},{"date":"2026-02-03","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2026_02","sourceCell":"A6","raw":"AI","id":"PAIRFIX-20260203-AI-114"},{"date":"2026-02-05","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2026_02","sourceCell":"A8","raw":"IL2","id":"PAIRFIX-20260205-IL-115"},{"date":"2026-02-06","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2026_02","sourceCell":"A9","raw":"LI1","id":"PAIRFIX-20260206-LI-116"},{"date":"2026-02-10","members":["aurelien","ludo"],"driver":"ludo","code":"LA","sourceSheet":"2026_02","sourceCell":"A11","raw":"LA","id":"PAIRFIX-20260210-LA-117"},{"date":"2026-02-17","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2026_02","sourceCell":"A16","raw":"IE","id":"PAIRFIX-20260217-IE-118"},{"date":"2026-03-02","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2026_03","sourceCell":"A5","raw":"2 AS EI","id":"PAIRFIX-20260302-AS-119"},{"date":"2026-03-02","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2026_03","sourceCell":"A5","raw":"2 AS EI","id":"PAIRFIX-20260302-EI-120"},{"date":"2026-03-03","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2026_03","sourceCell":"A6","raw":"IS","id":"PAIRFIX-20260303-IS-121"},{"date":"2026-03-10","members":["aurelien","etienne"],"driver":"etienne","code":"EA","sourceSheet":"2026_03","sourceCell":"A11","raw":"EA","id":"PAIRFIX-20260310-EA-122"},{"date":"2026-03-11","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2026_03","sourceCell":"A12","raw":"LI","id":"PAIRFIX-20260311-LI-123"},{"date":"2026-03-20","members":["etienne","stephane"],"driver":"etienne","code":"ES","sourceSheet":"2026_03","sourceCell":"A19","raw":"ES - AL","id":"PAIRFIX-20260320-ES-124"},{"date":"2026-03-20","members":["aurelien","ludo"],"driver":"aurelien","code":"AL","sourceSheet":"2026_03","sourceCell":"A19","raw":"ES - AL","id":"PAIRFIX-20260320-AL-125"},{"date":"2026-03-26","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2026_03","sourceCell":"A23","raw":"SA","id":"PAIRFIX-20260326-SA-126"},{"date":"2026-04-01","members":["etienne","igor"],"driver":"igor","code":"IE","sourceSheet":"2026_04","sourceCell":"A7","raw":"IE","id":"PAIRFIX-20260401-IE-127"},{"date":"2026-04-15","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2026_04","sourceCell":"A17","raw":"IL","id":"PAIRFIX-20260415-IL-128"},{"date":"2026-04-22","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2026_04","sourceCell":"A22","raw":"SI","id":"PAIRFIX-20260422-SI-129"},{"date":"2026-04-28","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2026_04","sourceCell":"A26","raw":"SA","id":"PAIRFIX-20260428-SA-130"},{"date":"2026-04-29","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2026_04","sourceCell":"A27","raw":"AS","id":"PAIRFIX-20260429-AS-131"},{"date":"2026-05-06","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2026_05","sourceCell":"A12","raw":"IA","id":"PAIRFIX-20260506-IA-132"},{"date":"2026-05-21","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2026_05","sourceCell":"A23","raw":"IS","id":"PAIRFIX-20260521-IS-133"},{"date":"2026-05-22","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2026_05","sourceCell":"A24","raw":"SI","id":"PAIRFIX-20260522-SI-134"},{"date":"2026-05-26","members":["igor","stephane"],"driver":"igor","code":"IS","sourceSheet":"2026_05","sourceCell":"A26","raw":"IS","id":"PAIRFIX-20260526-IS-135"},{"date":"2026-05-29","members":["igor","stephane"],"driver":"stephane","code":"SI","sourceSheet":"2026_05","sourceCell":"A29","raw":"SI","id":"PAIRFIX-20260529-SI-136"},{"date":"2026-06-02","members":["igor","ludo"],"driver":"ludo","code":"LI","sourceSheet":"2026_06","sourceCell":"A6","raw":"LI","id":"PAIRFIX-20260602-LI-137"},{"date":"2026-06-16","members":["aurelien","igor"],"driver":"aurelien","code":"AI","sourceSheet":"2026_06","sourceCell":"A16","raw":"AI","id":"PAIRFIX-20260616-AI-138"},{"date":"2026-06-17","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2026_06","sourceCell":"A17","raw":"SA","id":"PAIRFIX-20260617-SA-139"},{"date":"2026-06-19","members":["etienne","igor"],"driver":"etienne","code":"EI","sourceSheet":"2026_06","sourceCell":"A19","raw":"EI AS","id":"PAIRFIX-20260619-EI-140"},{"date":"2026-06-19","members":["aurelien","stephane"],"driver":"aurelien","code":"AS","sourceSheet":"2026_06","sourceCell":"A19","raw":"EI AS","id":"PAIRFIX-20260619-AS-141"},{"date":"2026-07-02","members":["aurelien","stephane"],"driver":"stephane","code":"SA","sourceSheet":"2026_07","sourceCell":"A8","raw":"SA","id":"PAIRFIX-20260702-SA-142"},{"date":"2026-07-07","members":["aurelien","igor"],"driver":"igor","code":"IA","sourceSheet":"2026_07","sourceCell":"A11","raw":"IA","id":"PAIRFIX-20260707-IA-143"},{"date":"2026-07-08","members":["igor","ludo"],"driver":"igor","code":"IL","sourceSheet":"2026_07","sourceCell":"A12","raw":"IL","id":"PAIRFIX-20260708-IL-144"},{"date":"2026-08-24","members":["ludo","stephane"],"driver":"stephane","code":"SL","sourceSheet":"2026_08","sourceCell":"A20","raw":"24 SL","id":"PAIRFIX-20260824-SL-145"}];
+const START_SHEET='2024_01', END_SHEET='2026_08', REPAIR_VERSION=1;
+const LABEL={aurelien:'Aurélien',etienne:'Étienne',igor:'Igor',ludo:'Ludo',stephane:'Stéphane'};
+const INITIAL={aurelien:'A',etienne:'E',igor:'I',ludo:'L',stephane:'S'};
+const $=id=>document.getElementById(id);
+const envName=ENV.environment==='test'?'TEST':ENV.environment==='production'?'PROD':null;
+$('envBadge').textContent=`${envName||'ENV INCONNU'} · ${ENV.firebaseConfig?.projectId||'?'}`;
+$('envBadge').classList.add(ENV.environment==='test'?'test':'prod');
+
+if(!envName){
+  $('identity').className='notice danger';
+  $('identity').textContent='Environnement non reconnu. Outil bloqué.';
+  throw new Error('Environnement non reconnu');
+}
+
+const app=initializeApp(ENV.firebaseConfig||{});
+const auth=getAuth(app), db=getFirestore(app);
+await setPersistence(auth,browserLocalPersistence);
+
+function waitAuth(){
+  return new Promise(resolve=>{
+    let done=false;
+    const off=onAuthStateChanged(auth,u=>{if(done)return;done=true;off();resolve(u||null)});
+    setTimeout(()=>{if(done)return;done=true;off();resolve(auth.currentUser||null)},2500);
+  });
+}
+const user=await waitAuth();
+if(!user){
+  $('identity').className='notice danger';
+  $('identity').innerHTML='Aucune session Firebase trouvée. Ouvre d’abord l’application principale avec le profil <strong>Igor</strong>, puis recharge cette page.';
+} else {
+  const link=await getDoc(doc(db,'deviceLinks',user.uid));
+  const pid=link.exists()?link.data().profileId:null;
+  if(pid!=='igor'){
+    $('identity').className='notice danger';
+    $('identity').textContent=`Outil réservé à Igor. Profil détecté : ${pid||'non lié'}.`;
+  } else {
+    $('identity').className='notice ok';
+    $('identity').innerHTML=`Identité vérifiée : <strong>Igor</strong>. Base ciblée : <strong>${envName}</strong>.`;
+    $('previewBtn').disabled=false;
+  }
+}
+
+const expectedByDate=new Map();
+for(const e of EXPECTED){
+  if(!expectedByDate.has(e.date))expectedByDate.set(e.date,[]);
+  expectedByDate.get(e.date).push({
+    id:e.id,members:e.members,driver:e.driver,source:'import',
+    sourceSheet:e.sourceSheet,sourceCell:e.sourceCell,sourceType:'pair_repair_2024_2026',
+    sourceRaw:e.raw
+  });
+}
+
+function membersOf(g){return [...new Set(g?.members||g?.participants||[])]}
+function isTargetHistoricalPair(g){
+  const m=membersOf(g), sheet=String(g?.sourceSheet||'');
+  if(m.length!==2 || !sheet || sheet>END_SHEET)return false;
+  const st=String(g?.sourceType||'');
+  const imported=String(g?.source||'')==='import' || st==='pair_code' || st==='pair_repair_2024_2026';
+  return imported && (st==='pair_code'||st==='pair_repair_2024_2026');
+}
+function codeOf(g){
+  const m=membersOf(g);
+  if(m.length!==2)return '';
+  const d=g.driver||g.driverId;
+  const other=m.find(x=>x!==d);
+  return (INITIAL[d]||'?')+(INITIAL[other]||'?');
+}
+function countCodes(dayMap){
+  const out={};
+  for(const [,data] of dayMap)for(const g of (data.groups||[])){
+    if(membersOf(g).length!==2)continue;
+    const c=codeOf(g);out[c]=(out[c]||0)+1;
+  }
+  return out;
+}
+function countTargetImported(dayMap){
+  const out={};
+  for(const [,data] of dayMap)for(const g of (data.groups||[]))if(isTargetHistoricalPair(g)){
+    const c=codeOf(g);out[c]=(out[c]||0)+1;
+  }
+  return out;
+}
+function expectedCounts(){
+  const out={};for(const e of EXPECTED)out[e.code]=(out[e.code]||0)+1;return out;
+}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function stableGroups(gs){
+  return gs.map(g=>({id:g.id||'',members:[...membersOf(g)].sort(),driver:g.driver||g.driverId||'',source:g.source||'',sourceSheet:g.sourceSheet||'',sourceCell:g.sourceCell||'',sourceType:g.sourceType||''}))
+           .sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+}
+let state=null;
+
+async function loadState(){
+  $('summary').innerHTML='<div class="notice">Lecture de tripDays…</div>';
+  const snap=await getDocs(collection(db,'tripDays'));
+  const before=new Map(snap.docs.map(d=>[d.id,{...d.data(),date:d.id}]));
+  const dates=new Set([...before.keys(),...expectedByDate.keys()]);
+  const after=new Map();
+  const changed=[];
+  const backup={schema:1,kind:'binome-repair-backup',environment:ENV.environment,projectId:ENV.firebaseConfig?.projectId,createdAt:new Date().toISOString(),repairVersion:REPAIR_VERSION,tripDays:[]};
+  let removed=0,added=0;
+  for(const date of [...dates].sort()){
+    const old=before.get(date)||{date,groups:[]};
+    const oldGroups=old.groups||[];
+    const targeted=oldGroups.filter(isTargetHistoricalPair);
+    removed+=targeted.length;
+    const kept=oldGroups.filter(g=>!isTargetHistoricalPair(g));
+    const desired=expectedByDate.get(date)||[];
+    added+=desired.length;
+    const newData={...old,date,groups:[...kept,...desired]};
+    after.set(date,newData);
+    if(JSON.stringify(stableGroups(oldGroups))!==JSON.stringify(stableGroups(newData.groups))){
+      changed.push(date);
+      backup.tripDays.push({date,data:old});
+    }
+  }
+  const conflicts=[];
+  for(const [date,data] of after){
+    const seen=new Map();
+    for(const g of data.groups||[]){
+      for(const p of membersOf(g)){
+        if(seen.has(p))conflicts.push(`${date} : ${LABEL[p]||p} apparaît dans plusieurs groupes`);
+        else seen.set(p,g.id||'?');
+      }
+    }
+  }
+  const beforeTarget=countTargetImported(before), exp=expectedCounts(), afterAll=countCodes(after), beforeAll=countCodes(before);
+  state={before,after,changed,backup,removed,added,conflicts,beforeTarget,exp,beforeAll,afterAll};
+  renderState();
+  $('backupBtn').disabled=changed.length===0;
+  $('applyBtn').disabled=changed.length===0 || conflicts.length>0;
+}
+
+function renderState(){
+  const s=state;
+  const codes=[...new Set([...Object.keys(s.beforeTarget),...Object.keys(s.exp)])].sort();
+  let rows='';
+  for(const c of codes)rows+=`<tr><td>${c}</td><td>${s.beforeTarget[c]||0}</td><td><strong>${s.exp[c]||0}</strong></td><td>${(s.exp[c]||0)-(s.beforeTarget[c]||0)}</td></tr>`;
+  $('summary').innerHTML=`
+    <div class="kpis">
+      <div class="kpi"><span class="muted">Documents modifiés</span><strong>${s.changed.length}</strong></div>
+      <div class="kpi"><span class="muted">Anciens binômes retirés</span><strong>${s.removed}</strong></div>
+      <div class="kpi"><span class="muted">Binômes reconstruits</span><strong>${s.added}</strong></div>
+      <div class="kpi"><span class="muted">Conflits détectés</span><strong>${s.conflicts.length}</strong></div>
+    </div>
+    ${s.conflicts.length?`<div class="notice danger"><strong>Correction bloquée.</strong><br>${s.conflicts.slice(0,20).map(esc).join('<br>')}</div>`:`<div class="notice ok"><strong>Aucun chevauchement détecté.</strong> Les groupes de 3/4/5 et les trajets saisis dans l'app sont préservés.</div>`}
+    <h2 style="margin-top:14px">Import historique des binômes : avant → référence</h2>
+    <div class="scroll"><table><thead><tr><th>Code</th><th>Avant</th><th>Référence</th><th>Écart</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="muted" style="margin-top:9px">Après simulation, les compteurs globaux peuvent être légèrement supérieurs à la référence si des trajets ont été saisis après août 2026 : ils sont volontairement conservés.</div>`;
+}
+
+function jsonReplacer(k,v){if(v&&typeof v.toDate==='function')return v.toDate().toISOString();return v}
+function downloadBackup(){
+  if(!state)return;
+  const blob=new Blob([JSON.stringify(state.backup,jsonReplacer,2)],{type:'application/json'});
+  const u=URL.createObjectURL(blob),a=document.createElement('a');
+  a.href=u;a.download=`sauvegarde_binomes_${ENV.environment}_${new Date().toISOString().slice(0,10)}.json`;a.click();
+  setTimeout(()=>URL.revokeObjectURL(u),1500);
+}
+$('backupBtn').addEventListener('click',downloadBackup);
+$('previewBtn').addEventListener('click',()=>loadState().catch(e=>{console.error(e);$('summary').innerHTML=`<div class="notice danger">${esc(e.message||e)}</div>`}));
+$('confirmText').addEventListener('input',()=>{if(!state)return;$('applyBtn').disabled=state.changed.length===0||state.conflicts.length>0||$('confirmText').value.trim().toUpperCase()!==envName});
+
+$('applyBtn').addEventListener('click',async()=>{
+  if(!state||state.conflicts.length)return;
+  if($('confirmText').value.trim().toUpperCase()!==envName)return;
+  $('applyBtn').disabled=true;$('result').innerHTML='<div class="notice">Sauvegarde puis écriture…</div>';
+  downloadBackup();
+  await new Promise(r=>setTimeout(r,500));
+  const changed=state.changed;
+  for(let i=0;i<changed.length;i+=300){
+    const b=writeBatch(db);
+    for(const date of changed.slice(i,i+300)){
+      const data=state.after.get(date);
+      b.set(doc(db,'tripDays',date),{...data,binomeRepairVersion:REPAIR_VERSION,binomeRepairedAt:serverTimestamp()});
+    }
+    await b.commit();
+  }
+  await setDoc(doc(db,'config','binomeRepair2026'),{
+    version:REPAIR_VERSION,environment:ENV.environment,projectId:ENV.firebaseConfig?.projectId,
+    expectedPairs2024To202608:EXPECTED.length,changedDocuments:changed.length,
+    appliedAt:serverTimestamp(),appliedByProfile:'igor'
+  },{merge:true});
+  $('result').innerHTML='<div class="notice">Écriture terminée. Vérification de la base…</div>';
+  await loadState();
+  if(state.conflicts.length===0 && state.changed.length===0){
+    $('result').innerHTML=`<div class="notice ok"><strong>Correction terminée et vérifiée sur ${envName}.</strong><br>Les binômes historiques ciblés correspondent maintenant à la référence. Les groupes de 3/4/5 n'ont pas été modifiés.</div>`;
+  } else {
+    $('result').innerHTML=`<div class="notice danger"><strong>Vérification incomplète.</strong> Il reste ${state.changed.length} document(s) différent(s) de la cible. Ne passe pas à la base suivante.</div>`;
+  }
+});
+</script>
+</main></body></html>
