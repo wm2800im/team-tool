@@ -1,0 +1,30 @@
+name: Apply PROD 4.5.0
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch production app
+        shell: bash
+        run: |
+          echo 'REPLACE_B64' | base64 -d > /tmp/patch_prod.py
+          python /tmp/patch_prod.py
+      - name: Syntax check
+        shell: bash
+        run: |
+          node --check app.js
+          node --check public-config.js
+      - name: Commit release
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.js styles.css index.html public-config.js CHANGEMENTS_4.5.0.md
+          git commit -m "feat(prod): release 4.5.0 with per-group actions and help"
+          git push
