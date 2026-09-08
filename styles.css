@@ -261,8 +261,36 @@ html[data-theme="dark"] .coffee-icon-btn{background:#151b22;color:var(--ink)}
 @media(max-width:520px){.unvalidated-trip-notice{align-items:flex-start}.unvalidated-trip-notice .btn{flex:0 0 auto}}
 
 
-/* 4.5.0 — actions indépendantes par groupe */
+/* 4.4.0-beta.21 — modification indépendante des groupes */
 .quick-group-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
 .quick-group-actions .btn{flex:1 1 145px}
 .group-card-focus{outline:3px solid var(--brand);outline-offset:2px;box-shadow:0 0 0 5px color-mix(in srgb,var(--brand) 12%,transparent)}
 @media(max-width:620px){.quick-group-actions{gap:6px}.quick-group-actions .btn{font-size:11.5px;min-height:38px;padding:8px 7px}}
+
+
+/* DELLE_PRIVATE_STYLES */
+.delle-private{margin-top:10px}
+.delle-card{border:1px solid #cbdbea;border-radius:14px;background:linear-gradient(145deg,#f8fbff,#eef5fb);padding:13px 14px;display:grid;gap:9px}
+.delle-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.delle-head h3{margin:4px 0 0;font-size:16px}.delle-lock{font-size:10.5px;font-weight:800;color:var(--brand);letter-spacing:.15px}.delle-place{font-size:10.5px;color:var(--muted);white-space:nowrap}
+.delle-main-rule,.delle-message{font-size:12px;line-height:1.4;color:var(--text)}.delle-message.no-trip{padding:9px 10px;border-radius:9px;background:var(--soft);border:1px solid var(--line)}
+.delle-counters{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted)}.delle-counters strong{font-size:11.5px;color:var(--text);padding:4px 7px;border-radius:8px;background:var(--card);border:1px solid var(--line)}
+.delle-suggest{font-size:12px}.delle-driver-row{display:grid;grid-template-columns:1fr minmax(110px,150px);gap:10px;align-items:center}.delle-driver-row label{font-size:11.5px;font-weight:700}
+.delle-actions{display:flex;gap:7px;flex-wrap:wrap}.delle-validated{padding:8px 10px;border-radius:9px;background:#eefaf4;border:1px solid #c9ead9;font-size:11.5px}.delle-warning{padding:8px 10px;border-radius:9px;background:#fff6e8;border:1px solid #f2d6a6;font-size:11.5px;line-height:1.4}
+html[data-theme="dark"] .delle-card{background:linear-gradient(145deg,#17222d,#1a2734);border-color:#33485d}html[data-theme="dark"] .delle-validated{background:#13271f;border-color:#285a44}html[data-theme="dark"] .delle-warning{background:#302515;border-color:#604b27}
+@media(max-width:620px){.delle-card{padding:11px}.delle-head{align-items:center}.delle-place{display:none}.delle-driver-row{grid-template-columns:1fr}.delle-actions .btn{flex:1 1 120px}}
+
+
+/* 4.6 beta.2 — historique Delle privé */
+.delle-history-shell{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+.delle-history-shell>summary{cursor:pointer;font-weight:800;color:var(--brand);list-style:none;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.delle-history-shell>summary::-webkit-details-marker{display:none}
+.delle-history-shell>summary:after{content:'›';font-size:22px;transition:transform .18s ease}
+.delle-history-shell[open]>summary:after{transform:rotate(90deg)}
+.delle-history-body{display:grid;gap:10px;margin-top:10px}
+.delle-history-add{display:grid;grid-template-columns:1.2fr 1fr auto;gap:8px;align-items:end;padding:10px;border-radius:12px;background:var(--soft);border:1px solid var(--line)}
+.delle-history-list{display:grid;gap:7px}
+.delle-history-row{display:grid;grid-template-columns:minmax(130px,1fr) 110px auto auto;gap:7px;align-items:center;padding:8px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.delle-history-date{display:flex;flex-direction:column;gap:2px}.delle-history-date span{font-size:10.5px;color:var(--muted)}
+.delle-history-select{min-height:36px;padding:6px 8px}.delle-no-live{padding:8px 0}
+@media(max-width:680px){.delle-history-add{grid-template-columns:1fr 1fr}.delle-history-add .btn{grid-column:1/-1}.delle-history-row{grid-template-columns:1fr 100px}.delle-history-row .delle-history-save,.delle-history-row .delle-history-delete{width:100%}}
