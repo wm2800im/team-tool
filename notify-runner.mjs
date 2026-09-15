@@ -71,7 +71,8 @@ async function processBroadcastRequests(){
 
 async function process20hReminders(){
   const now=localParts();
-  if(now.hour!==20)return;
+  // GitHub peut lancer un cron avec retard : on garde une fenêtre de rattrapage raisonnable.
+  if(now.hour<20 || now.hour>22)return;
   const today=isoDate(now.year,now.month,now.day), target=addDaysISO(today,1);
   const calendarSnap=await db.collection('config').doc('calendar').get();
   const calendar=calendarSnap.exists?calendarSnap.data():{exceptions:[]};
@@ -80,16 +81,33 @@ async function process20hReminders(){
   const prefs=new Map(prefSnap.docs.map(d=>[d.id,d.data()]));
   for(const pid of PEOPLE){
     if(prefs.get(pid)?.notificationsEnabled!==true)continue;
-    const avail=await db.collection('availability').doc(`${target}_${pid}`).get();
-    if(avail.exists && avail.data()?.status)continue;
-    const marker=db.collection('notificationRuns').doc(`reminder_${target}_${pid}`);
-    if((await marker.get()).exists)continue;
-    const toks=await enabledTokens(pid);
-    if(!toks.length)continue;
-    const body=`Ton statut pour ${frDate(target)} n’est pas encore renseigné.`;
-    const r=await sendTokens(toks,'Covoiturage',body);
-    await marker.set({type:'reminder',date:target,profileId:pid,sentAt:FieldValue.serverTimestamp(),successCount:r.successCount,failureCount:r.failureCount});
-    console.log(`Rappel ${LABELS[pid]} ${target}: ${r.successCount} ok`);
+    try{
+      const avail=await db.collection('availability').doc(`${target}_${pid}`).get();
+      if(avail.exists && avail.data()?.status)continue;
+      const marker=db.collection('notificationRuns').doc(`reminder_${target}_${pid}`);
+      const markerSnap=await marker.get();
+      // Les anciens marqueurs sans statut sont considérés comme déjà envoyés.
+      if(markerSnap.exists && markerSnap.data()?.status!=='retry')continue;
+      const toks=await enabledTokens(pid);
+      if(!toks.length){
+        await marker.set({type:'reminder',date:target,profileId:pid,status:'retry',reason:'no-enabled-token',lastAttemptAt:FieldValue.serverTimestamp(),attempts:FieldValue.increment(1)},{merge:true});
+        console.log(`Rappel ${LABELS[pid]} ${target}: aucun appareil actif, nouvel essai plus tard.`);
+        continue;
+      }
+      const body=`Ton statut pour ${frDate(target)} n’est pas encore renseigné.`;
+      const r=await sendTokens(toks,'Covoiturage',body);
+      if(r.successCount>0){
+        await marker.set({type:'reminder',date:target,profileId:pid,status:'sent',sentAt:FieldValue.serverTimestamp(),successCount:r.successCount,failureCount:r.failureCount,attempts:FieldValue.increment(1)},{merge:true});
+        console.log(`Rappel ${LABELS[pid]} ${target}: ${r.successCount} ok`);
+      }else{
+        await marker.set({type:'reminder',date:target,profileId:pid,status:'retry',reason:'push-failed',lastAttemptAt:FieldValue.serverTimestamp(),successCount:0,failureCount:r.failureCount,attempts:FieldValue.increment(1)},{merge:true});
+        console.warn(`Rappel ${LABELS[pid]} ${target}: aucun envoi réussi, nouvel essai plus tard.`);
+      }
+    }catch(e){
+      console.error(`Rappel ${LABELS[pid]} ${target}`,e);
+      const marker=db.collection('notificationRuns').doc(`reminder_${target}_${pid}`);
+      await marker.set({type:'reminder',date:target,profileId:pid,status:'retry',reason:'exception',error:String(e?.message||e).slice(0,500),lastAttemptAt:FieldValue.serverTimestamp(),attempts:FieldValue.increment(1)},{merge:true}).catch(()=>{});
+    }
   }
 }
 

@@ -9,7 +9,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 const ENV = globalThis.COVOIT_ENV || {};
 const firebaseConfig = ENV.firebaseConfig || {};
-const APP_VERSION = ENV.version || '4.6.0';
+const APP_VERSION = ENV.version || '4.7.0';
 const IS_TEST = ENV.environment === 'test';
 const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
@@ -18,6 +18,9 @@ const db = getFirestore(app);
 let messaging = null;
 let messagingSwRegistration = null;
 let currentFcmToken = null;
+let messagingForegroundListenerBound = false;
+let notificationRepairInFlight = false;
+let notificationRepairLastAt = 0;
 
 const PEOPLE = ['aurelien','etienne','igor','ludo','stephane'];
 const LABELS = {aurelien:'Aurélien',etienne:'Étienne',igor:'Igor',ludo:'Ludo',stephane:'Stéphane'};
@@ -358,6 +361,8 @@ function initStaticUI(){
   window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;$('installBtn').style.display='inline-block';});
   if('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js').catch(console.warn);
   initMessaging().catch(console.warn);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)recheckNotificationState({silent:true}).catch(console.warn);});
+  window.addEventListener('pageshow',()=>recheckNotificationState({silent:true}).catch(console.warn));
 }
 function syncUnknownTimeHelp(){const help=$('timeUnknownHelp');if(help)help.style.display=$('timeLimit')?.value===LATE_UNKNOWN?'block':'none';}
 function fillTimeSelect(sel,value='16:15'){
@@ -838,57 +843,142 @@ function initSettingsUI(){
   if(IS_TEST){$('testUserSwitch').innerHTML=PEOPLE.map(p=>`<option value="${p}">${label(p)}</option>`).join('');$('testUserSwitch').value=profileId;}
   renderSettings();
 }
+function notificationPermissionState(){
+  if(!('Notification' in window))return 'unsupported';
+  return Notification.permission||'default';
+}
+function notificationBlockedHelp(){
+  return 'Notifications bloquées dans les réglages de ce téléphone.';
+}
+function ensureNotificationRecheckButton(){
+  const status=$('notificationStatus'); if(!status)return null;
+  let btn=$('notificationRecheckBtn');
+  if(!btn){
+    btn=document.createElement('button');btn.id='notificationRecheckBtn';btn.type='button';btn.className='btn secondary smallbtn';btn.textContent='↻ Revérifier';btn.style.marginTop='8px';
+    status.insertAdjacentElement('afterend',btn);
+    btn.addEventListener('click',()=>recheckNotificationState({silent:false}));
+  }
+  return btn;
+}
 function renderSettings(){
   if(!$('menuProfileName'))return; $('menuProfileName').textContent=IS_TEST&&profileId!==linkedProfileId?`${label(linkedProfileId)} · simulation ${label(profileId)}`:label(profileId); $('aboutVersion').textContent=APP_VERSION;
   $('adminMenuBlock').style.display=linkedProfileId==='igor'?'block':'none'; $('testSwitchBlock').style.display=IS_TEST?'block':'none'; if(IS_TEST)$('testUserSwitch').value=profileId;
   const theme=pref(profileId).theme||'auto'; qsa('[data-theme]').forEach(b=>b.classList.toggle('active',b.dataset.theme===theme));
-  const np=pref(linkedProfileId); $('notificationsToggle').checked=np.notificationsEnabled===true; $('notificationsToggle').disabled=IS_TEST&&profileId!==linkedProfileId;
-  $('notificationStatus').textContent=(IS_TEST&&profileId!==linkedProfileId)?'Repasse sur Igor pour tester les notifications de cet appareil.':(np.notificationsEnabled?'Rappel activé à 20h.':'Désactivé par défaut.');
-  const canTestNotifications=profileId===linkedProfileId&&np.notificationsEnabled;
+  const np=pref(linkedProfileId), permission=notificationPermissionState(), simulated=IS_TEST&&profileId!==linkedProfileId;
+  const toggle=$('notificationsToggle'), status=$('notificationStatus'), recheck=ensureNotificationRecheckButton();
+  let checked=false,disabled=simulated,txt='Désactivé par défaut.',showRecheck=false;
+  if(simulated){txt='Repasse sur Igor pour tester les notifications de cet appareil.';}
+  else if(permission==='unsupported'){
+    disabled=true;txt='Notifications non prises en charge par ce navigateur.';
+  }else if(permission==='denied'){
+    disabled=true;showRecheck=true;
+    txt='⚠️ Notifications bloquées sur cet appareil.';
+  }else if(permission==='default'){
+    checked=false;showRecheck=np.notificationsEnabled===true;
+    txt=np.notificationsEnabled===true?'Notifications à autoriser sur cet appareil.':'Active le rappel pour recevoir les notifications.';
+  }else{
+    checked=np.notificationsEnabled===true;
+    txt=checked?'✓ Rappel activé à 20h · cet appareil est autorisé.':'Notifications autorisées sur cet appareil · rappel désactivé.';
+  }
+  toggle.checked=checked;toggle.disabled=disabled;status.textContent=txt;
+  if(recheck){recheck.style.display=showRecheck?'inline-flex':'none';recheck.textContent=permission==='default'?'🔔 Autoriser les notifications':'↻ Revérifier';}
+  const canTestNotifications=!simulated&&permission==='granted'&&np.notificationsEnabled===true;
   const nta=$('notificationTestActions'); if(nta)nta.style.display=canTestNotifications?'flex':'none';
-  const localTestBtn=$('localNotificationTestBtn'); if(localTestBtn)localTestBtn.style.display=canTestNotifications?'inline-flex':'none';
+  const localTestBtn=$('localNotificationTestBtn'); if(localTestBtn){localTestBtn.style.display=canTestNotifications?'inline-flex':'none';localTestBtn.textContent='🔔 Tester cet appareil';}
   const copyTokenBtn=$('copyFcmTokenBtn'); if(copyTokenBtn)copyTokenBtn.style.display=(IS_TEST&&canTestNotifications)?'inline-flex':'none';
-  $('simulatedBadge').style.display=IS_TEST&&profileId!==linkedProfileId?'inline-block':'none'; $('simulatedBadge').textContent=IS_TEST&&profileId!==linkedProfileId?`simule ${label(profileId)}`:'';
+  $('simulatedBadge').style.display=simulated?'inline-block':'none'; $('simulatedBadge').textContent=simulated?`simule ${label(profileId)}`:'';
+  if(canTestNotifications)setTimeout(()=>repairNotificationRegistration({force:false}).catch(e=>console.warn('Notification auto-repair',e)),0);
 }
 function switchTestUser(pid){ if(!IS_TEST||!PEOPLE.includes(pid))return; profileId=pid; $('identityName').textContent=label(pid); applyTheme(); renderAll(); renderSettings(); closeSettingsMenu(); toast(`Simulation : ${label(pid)}`); }
 
 async function initMessaging(){
-  if(!('Notification' in window) || !(await messagingSupported()))return;
-  messaging=getMessaging(app);
-  if('serviceWorker' in navigator){try{messagingSwRegistration=await navigator.serviceWorker.register('./firebase-messaging-sw.js',{scope:'./fcm/'});}catch(e){console.warn('FCM SW',e);}}
-  onMessage(messaging,payload=>toast(payload?.notification?.body||'Nouvelle notification Covoiturage'));
+  if(!('Notification' in window) || !(await messagingSupported()))return false;
+  if(!messaging)messaging=getMessaging(app);
+  if('serviceWorker' in navigator && !messagingSwRegistration){
+    try{
+      messagingSwRegistration=await navigator.serviceWorker.register('./firebase-messaging-sw.js',{scope:'./fcm/',updateViaCache:'none'});
+      await messagingSwRegistration.update().catch(()=>{});
+    }catch(e){console.warn('FCM SW',e);throw new Error('Le service de notifications n’a pas pu démarrer sur cet appareil.');}
+  }
+  if(!messagingForegroundListenerBound){
+    onMessage(messaging,payload=>toast(payload?.notification?.body||'Nouvelle notification Covoiturage'));
+    messagingForegroundListenerBound=true;
+  }
+  return !!messaging;
+}
+async function registerCurrentDevicePush(){
+  if(!VAPID_KEY||VAPID_KEY.includes('REMPLACER'))throw new Error('La clé Web Push VAPID n’est pas configurée.');
+  if(notificationPermissionState()!=='granted')throw new Error(notificationPermissionState()==='denied'?notificationBlockedHelp():'Active d’abord les notifications sur cet appareil.');
+  if(!messaging)await initMessaging();
+  if(!messagingSwRegistration)throw new Error('Service de notifications indisponible. Recharge l’application puis réessaie.');
+  const token=await getToken(messaging,{vapidKey:VAPID_KEY,serviceWorkerRegistration:messagingSwRegistration});
+  if(!token)throw new Error('Impossible d’obtenir le jeton de notification de cet appareil.');
+  currentFcmToken=token;
+  await setDoc(doc(db,'pushTokens',authUser.uid),{profileId:linkedProfileId,token,enabled:true,permission:'granted',userAgent:navigator.userAgent.slice(0,300),updatedAt:serverTimestamp()},{merge:true});
+  return token;
+}
+async function repairNotificationRegistration({force=false}={}){
+  if(notificationRepairInFlight)return !!currentFcmToken;
+  if(notificationPermissionState()!=='granted'||pref(linkedProfileId).notificationsEnabled!==true||profileId!==linkedProfileId)return false;
+  const now=Date.now();if(!force&&now-notificationRepairLastAt<120000)return !!currentFcmToken;
+  notificationRepairInFlight=true;
+  try{await registerCurrentDevicePush();notificationRepairLastAt=Date.now();return true;}
+  finally{notificationRepairInFlight=false;}
+}
+async function recheckNotificationState({silent=false}={}){
+  let permission=notificationPermissionState();
+  if(permission==='default'&&!silent){
+    try{permission=await Notification.requestPermission();}catch(e){console.warn('Notification permission',e);}
+  }
+  if(permission==='denied'){
+    renderSettings();
+    if(!silent)toast('Toujours bloquées · réactive-les dans les réglages du téléphone.');
+    return false;
+  }
+  if(permission==='granted'&&pref(linkedProfileId).notificationsEnabled===true&&profileId===linkedProfileId){
+    try{await repairNotificationRegistration({force:true});if(!silent)toast('✓ Notifications prêtes sur cet appareil.');}
+    catch(e){console.error(e);if(!silent)toast('Impossible de réactiver les notifications.');}
+  }
+  renderSettings();return permission==='granted';
 }
 async function toggleNotifications(){
   const el=$('notificationsToggle'); const enable=el.checked;
-  if(IS_TEST&&profileId!==linkedProfileId){el.checked=false;alert('Repasse sur Igor pour activer les notifications de cet appareil.');return;}
+  if(IS_TEST&&profileId!==linkedProfileId){renderSettings();alert('Repasse sur Igor pour activer les notifications de cet appareil.');return;}
   try{
     if(enable){
-      if(!VAPID_KEY||VAPID_KEY.includes('REMPLACER'))throw new Error('La clé Web Push VAPID n’est pas encore configurée.');
-      if(!messaging)await initMessaging(); const permission=await Notification.requestPermission(); if(permission!=='granted')throw new Error('Autorisation de notification refusée sur cet appareil.');
-      const token=await getToken(messaging,{vapidKey:VAPID_KEY,serviceWorkerRegistration:messagingSwRegistration||undefined}); if(!token)throw new Error('Impossible d’obtenir le jeton de notification.'); currentFcmToken=token;
-      await setDoc(doc(db,'pushTokens',authUser.uid),{profileId:linkedProfileId,token,enabled:true,userAgent:navigator.userAgent.slice(0,300),updatedAt:serverTimestamp()});
-      await setDoc(doc(db,'preferences',linkedProfileId),{notificationsEnabled:true,updatedAt:serverTimestamp()},{merge:true}); toast('Notifications activées.');
+      if(notificationPermissionState()==='denied')throw new Error(notificationBlockedHelp());
+      if(!messaging)await initMessaging();
+      let permission=notificationPermissionState();
+      if(permission==='default')permission=await Notification.requestPermission();
+      if(permission!=='granted')throw new Error(permission==='denied'?notificationBlockedHelp():'Autorisation de notification non accordée.');
+      await registerCurrentDevicePush();
+      await setDoc(doc(db,'preferences',linkedProfileId),{notificationsEnabled:true,updatedAt:serverTimestamp()},{merge:true});
+      notificationRepairLastAt=Date.now();toast('✓ Notifications activées sur cet appareil.');
     }else{
-      await setDoc(doc(db,'preferences',linkedProfileId),{notificationsEnabled:false,updatedAt:serverTimestamp()},{merge:true}); await deleteDoc(doc(db,'pushTokens',authUser.uid)).catch(()=>{}); if(messaging)await deleteToken(messaging).catch(()=>{}); currentFcmToken=null; toast('Notifications désactivées.');
+      await setDoc(doc(db,'preferences',linkedProfileId),{notificationsEnabled:false,updatedAt:serverTimestamp()},{merge:true});
+      await deleteDoc(doc(db,'pushTokens',authUser.uid)).catch(()=>{});
+      if(messaging)await deleteToken(messaging).catch(()=>{});
+      currentFcmToken=null;notificationRepairLastAt=0;toast('Notifications désactivées.');
     }
-  }catch(e){console.error(e);el.checked=!enable;alert(e.message||friendlyError(e));}
+  }catch(e){
+    console.error(e);renderSettings();
+    if(notificationPermissionState()==='denied')toast(notificationBlockedHelp());else alert(e.message||friendlyError(e));
+    return;
+  }
+  renderSettings();
 }
 
 async function ensureFcmToken(){
-  if(currentFcmToken)return currentFcmToken;
-  if(!VAPID_KEY)throw new Error('Clé VAPID absente.');
-  if(!messaging)await initMessaging();
-  if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
-  currentFcmToken=await getToken(messaging,{vapidKey:VAPID_KEY,serviceWorkerRegistration:messagingSwRegistration||undefined});
-  return currentFcmToken;
+  if(notificationPermissionState()!=='granted')throw new Error(notificationPermissionState()==='denied'?notificationBlockedHelp():'Active d’abord les notifications.');
+  return await registerCurrentDevicePush();
 }
 async function testLocalNotification(){
   try{
-    if(Notification.permission!=='granted')throw new Error('Active d’abord les notifications.');
+    await ensureFcmToken();
     const reg=messagingSwRegistration || await navigator.serviceWorker.ready;
-    await reg.showNotification(IS_TEST?'Covoiturage · TEST':'Covoiturage',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',data:{link:'../'}});
-    toast('Notification de test envoyée sur cet appareil.');
-  }catch(e){alert(e.message||friendlyError(e));}
+    await reg.showNotification(IS_TEST?'Covoiturage · TEST':'Covoiturage',{body:'Notification de test reçue correctement ✅',icon:'./icon-192.png',badge:'./icon-192.png',tag:'covoiturage-device-test',renotify:true,data:{link:location.href}});
+    toast('✓ Test envoyé. Vérifie la notification sur cet appareil.');
+  }catch(e){console.error(e);renderSettings();alert(e.message||friendlyError(e));}
 }
 async function copyFcmToken(){
   try{const token=await ensureFcmToken();await navigator.clipboard.writeText(token);toast('Jeton FCM copié.');}
@@ -1045,16 +1135,16 @@ function delleMainState(ds){
   const mainValidated=!!validated&&validatedDriver===plannedDriver;
   return{kind:'same',proposal,group:ig,validated,mainValidated,mainDriver:validatedDriver||plannedDriver};
 }
-function dellePrivateHeader(){return `<div class="delle-head"><div><span class="delle-lock">🔒 Privé Igor · Ludo</span><h3>🚗 Jusqu’à Delle</h3></div><span class="delle-place">Point de ralliement</span></div>`;}
+function dellePrivateHeader(){return `<div class="proposal-head"><h3>Covoiturage jusqu’à Delle</h3><span class="small muted">🔒 Privé</span></div>`;}
 function delleHistoryHtml(){
-  if(!delleTripsReady)return '<details class="delle-history-shell"><summary>Historique Delle</summary><div class="small muted delle-history-loading">Chargement…</div></details>';
-  if(delleTripsError)return `<details class="delle-history-shell" open><summary>Historique Delle</summary><div class="delle-warning">Historique indisponible : ${delleTripsError}</div></details>`;
+  if(!delleTripsReady)return '<details class="delle-history-shell"><summary>Historique</summary><div class="small muted delle-history-loading">Chargement…</div></details>';
+  if(delleTripsError)return `<details class="delle-history-shell" open><summary>Historique</summary><div class="delle-warning">Historique indisponible : ${delleTripsError}</div></details>`;
   const rotation=delleRotation(),rows=[...delleTrips.values()].filter(x=>DELLE_PAIR.includes(x.driver)).sort((a,b)=>b.date.localeCompare(a.date));
   const list=rows.length?rows.slice(0,80).map(x=>{
     const st=historicalDelleMainState(x.date),forced=st.kind==='same'&&DELLE_PAIR.includes(st.mainDriver)?st.mainDriver:null;
     return `<div class="delle-history-row"><div class="delle-history-date"><strong>${fmtDate(x.date,{day:'2-digit',month:'2-digit',year:'numeric'})}</strong><span>${forced?'conducteur imposé par le groupe':'trajet privé'}</span></div><select class="input delle-history-select" data-date="${x.date}" ${forced?'disabled':''}><option value="igor" ${x.driver==='igor'?'selected':''}>Igor</option><option value="ludo" ${x.driver==='ludo'?'selected':''}>Ludo</option></select><button class="btn secondary smallbtn delle-history-save" data-date="${x.date}" ${forced?'disabled':''}>Modifier</button><button class="btn danger smallbtn delle-history-delete" data-date="${x.date}">Suppr.</button></div>`;
-  }).join(''):'<div class="small muted">Aucun trajet Delle enregistré.</div>';
-  return `<details class="delle-history-shell"><summary>Historique Delle · Igor ${rotation.counts.igor} / Ludo ${rotation.counts.ludo}</summary><div class="delle-history-body"><div class="delle-history-add"><div class="field"><label>Ajouter un ancien trajet</label><input id="delleHistoryDate" class="input" type="date" max="${todayISO()}"></div><div class="field"><label>Conducteur réel</label><select id="delleHistoryNewDriver" class="input"><option value="igor">Igor</option><option value="ludo">Ludo</option></select></div><button id="delleHistoryAdd" class="btn smallbtn" type="button">Ajouter</button></div><div id="delleHistoryState" class="small muted">Un trajet passé peut être ajouté si Igor et Ludo étaient dans le même groupe principal ce jour-là.</div><div class="delle-history-list">${list}</div></div></details>`;
+  }).join(''):'<div class="small muted">Aucun trajet enregistré.</div>';
+  return `<details class="delle-history-shell"><summary>Historique · Igor ${rotation.counts.igor} / Ludo ${rotation.counts.ludo}</summary><div class="delle-history-body"><div class="delle-history-add"><div class="field"><label>Ajouter un ancien trajet</label><input id="delleHistoryDate" class="input" type="date" max="${todayISO()}"></div><div class="field"><label>Conducteur réel</label><select id="delleHistoryNewDriver" class="input"><option value="igor">Igor</option><option value="ludo">Ludo</option></select></div><button id="delleHistoryAdd" class="btn smallbtn" type="button">Ajouter</button></div><div id="delleHistoryState" class="small muted">Un trajet passé peut être ajouté si Igor et Ludo étaient dans le même groupe principal ce jour-là.</div><div class="delle-history-list">${list}</div></div></details>`;
 }
 function bindDelleHistoryActions(){
   $('delleHistoryAdd')?.addEventListener('click',async()=>{
@@ -1064,7 +1154,7 @@ function bindDelleHistoryActions(){
   });
   qsa('.delle-history-save').forEach(btn=>btn.addEventListener('click',async()=>{
     const ds=btn.dataset.date,sel=document.querySelector(`.delle-history-select[data-date="${ds}"]`);btn.disabled=true;
-    try{await saveHistoricalDelleTrip(ds,sel?.value);toast('✓ Historique Delle modifié');}catch(e){alert(friendlyError(e));btn.disabled=false;}
+    try{await saveHistoricalDelleTrip(ds,sel?.value);toast('✓ Historique modifié');}catch(e){alert(friendlyError(e));btn.disabled=false;}
   }));
   qsa('.delle-history-delete').forEach(btn=>btn.addEventListener('click',()=>deleteDelleTrip(btn.dataset.date)));
 }
@@ -1074,18 +1164,34 @@ function renderDellePrivate(ds){
   if(!isDelleViewer())return;
   host.style.display='block';
   const history=delleHistoryHtml();
-  if(delleTripsError){host.innerHTML=`${dellePrivateHeader()}<div class="delle-warning">Données Delle indisponibles : ${delleTripsError}</div>${history}`;bindDelleHistoryActions();return;}
+  const shell=(body='')=>`<div class="proposal-shell delle-proposal-shell">${dellePrivateHeader()}${body}${history}</div>`;
+  if(delleTripsError){host.innerHTML=shell(`<div class="small muted">Données momentanément indisponibles.</div>`);bindDelleHistoryActions();return;}
   const both=isAvailable(getAvail(ds,'igor'))&&isAvailable(getAvail(ds,'ludo'));
-  if(!both){host.innerHTML=`${dellePrivateHeader()}<div class="small muted delle-no-live">Pas de trajet commun Delle prévu pour le prochain jour.</div>${history}`;bindDelleHistoryActions();return;}
+  if(!both){host.innerHTML=shell(`<div class="small muted">Aucun trajet commun prévu.</div>`);bindDelleHistoryActions();return;}
   const state=delleMainState(ds);
-  if(state.kind==='separate'){host.innerHTML=`${dellePrivateHeader()}<div class="delle-warning">Igor et Ludo sont dans des groupes différents : pas de trajet commun jusqu’à Delle.</div>${history}`;bindDelleHistoryActions();return;}
-  if(state.kind!=='same'){host.innerHTML=`${dellePrivateHeader()}<div class="small muted delle-no-live">La répartition principale doit être définie avant le trajet jusqu’à Delle.</div>${history}`;bindDelleHistoryActions();return;}
+  if(state.kind==='separate'){host.innerHTML=shell(`<div class="small muted">Igor et Ludo sont dans deux groupes différents.</div>`);bindDelleHistoryActions();return;}
+  if(state.kind!=='same'){host.innerHTML=shell(`<div class="small muted">En attente de la répartition principale.</div>`);bindDelleHistoryActions();return;}
+
   const rotation=delleRotation(ds),existing=delleTrips.get(ds),mainDriver=state.mainDriver,forced=DELLE_PAIR.includes(mainDriver)?mainDriver:null;
   const selected=forced||existing?.driver||rotation.suggested,ready=state.mainValidated;
   const mismatch=existing&&forced&&existing.driver!==forced;
-  host.innerHTML=`${dellePrivateHeader()}<div class="delle-body"><div class="delle-counters">Rotation Delle : Igor <strong>${rotation.counts.igor}</strong> · Ludo <strong>${rotation.counts.ludo}</strong></div><div class="delle-suggest">${forced?'🚘 Conducteur imposé par le groupe':'🔁 Tour conseillé'} : <strong>${label(forced||rotation.suggested)}</strong></div><div class="delle-driver-row"><label>Conducteur réel jusqu’à Delle</label><select id="delleDriver" class="input" ${(forced||!ready)?'disabled':''}><option value="igor" ${selected==='igor'?'selected':''}>Igor</option><option value="ludo" ${selected==='ludo'?'selected':''}>Ludo</option></select></div>${!ready?'<div class="small muted">Valide d’abord le groupe principal. La priorité du trajet principal est ainsi garantie.</div>':''}${mismatch?'<div class="delle-warning">Le trajet Delle enregistré ne correspond plus au conducteur du groupe principal. Mets-le à jour.</div>':''}${existing&&!mismatch?`<div class="delle-validated">✓ Delle validé : <strong>${label(existing.driver)}</strong></div>`:''}<div class="delle-actions"><button id="saveDelleTrip" class="btn smallbtn" type="button" ${!ready?'disabled':''}>${existing?'↻ Mettre à jour':'✓ Valider Delle'}</button>${existing?'<button id="deleteDelleTrip" class="btn secondary smallbtn" type="button">Annuler</button>':''}</div></div>${history}`;
+  const validated=existing&&!mismatch;
+  host.innerHTML=`<div class="proposal-shell delle-proposal-shell">
+    ${dellePrivateHeader()}
+    <div class="proposal-group-simple">
+      <div class="proposal-main-line"><strong>Igor · Ludo</strong><span class="proposal-suggested">Suggéré : ${label(forced||rotation.suggested)}</span></div>
+      <div class="proposal-counter-line">Compteurs : Igor ${rotation.counts.igor} · Ludo ${rotation.counts.ludo}</div>
+      <div class="proposal-driver-row"><label>Conducteur réel</label><select id="delleDriver" class="input" ${(forced||!ready||validated)?'disabled':''}><option value="igor" ${selected==='igor'?'selected':''}>Igor</option><option value="ludo" ${selected==='ludo'?'selected':''}>Ludo</option></select></div>
+    </div>
+    ${mismatch?'<div class="group-warning">Le conducteur doit être remis à jour.</div>':''}
+    ${validated?`<div class="validated-summary"><div class="validated-title">✓ Trajet validé</div><div class="validated-line"><span>🚗 <strong>${label(existing.driver)}</strong></span></div></div>`:''}
+    <div class="quick-actions"><button id="saveDelleTrip" class="btn" type="button" ${(!ready||validated)?'disabled':''}>${validated?'✓ Trajet validé':existing?'↻ Mettre à jour':'✓ Valider le trajet'}</button><button id="openDelleHistory" class="btn secondary" type="button">Historique</button></div>
+    ${history}
+  </div>`;
+
   $('saveDelleTrip')?.addEventListener('click',async()=>{const btn=$('saveDelleTrip');btn.disabled=true;try{await saveDelleTrip(ds,$('delleDriver').value);}catch(e){alert(friendlyError(e));btn.disabled=false;}});
-  $('deleteDelleTrip')?.addEventListener('click',()=>deleteDelleTrip(ds));
+  $('openDelleHistory')?.addEventListener('click',()=>{const details=host.querySelector('.delle-history-shell');if(details){details.open=!details.open;if(details.open)details.scrollIntoView({behavior:'smooth',block:'nearest'});}});
+  $('delleDriver')?.addEventListener('change',()=>{const btn=$('saveDelleTrip');if(btn&&ready){btn.disabled=false;btn.textContent=existing?'↻ Mettre à jour':'✓ Valider le trajet';}});
   bindDelleHistoryActions();
 }
 async function writeDelleTrip(ds,driver,state,source){

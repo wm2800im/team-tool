@@ -294,3 +294,36 @@ html[data-theme="dark"] .delle-card{background:linear-gradient(145deg,#17222d,#1
 .delle-history-date{display:flex;flex-direction:column;gap:2px}.delle-history-date span{font-size:10.5px;color:var(--muted)}
 .delle-history-select{min-height:36px;padding:6px 8px}.delle-no-live{padding:8px 0}
 @media(max-width:680px){.delle-history-add{grid-template-columns:1fr 1fr}.delle-history-add .btn{grid-column:1/-1}.delle-history-row{grid-template-columns:1fr 100px}.delle-history-row .delle-history-save,.delle-history-row .delle-history-delete{width:100%}}
+
+
+/* 4.6 beta.7 — Delle jaune pâle + toast au premier plan */
+.toast{z-index:260!important}
+.delle-proposal-shell{
+  background:#fff8e7!important;
+  border-color:#e6c86f!important;
+  color:#4f4210!important;
+}
+.delle-proposal-shell .proposal-head h3,
+.delle-proposal-shell .proposal-driver-row label{color:#6f5a0c!important}
+.delle-proposal-shell .proposal-suggested,
+.delle-proposal-shell .proposal-counter-line{color:#806d2d!important}
+.delle-proposal-shell .validated-summary{
+  background:rgba(255,255,255,.62)!important;
+  border-color:#e6c86f!important;
+  color:#6f5a0c!important;
+}
+.delle-proposal-shell .delle-history-shell{border-top-color:#eadca8!important}
+html[data-theme="dark"] .delle-proposal-shell{
+  background:#2b251a!important;
+  border-color:#705c26!important;
+  color:#ffe8a3!important;
+}
+html[data-theme="dark"] .delle-proposal-shell .proposal-head h3,
+html[data-theme="dark"] .delle-proposal-shell .proposal-driver-row label,
+html[data-theme="dark"] .delle-proposal-shell .proposal-suggested,
+html[data-theme="dark"] .delle-proposal-shell .proposal-counter-line{color:#f1c87e!important}
+html[data-theme="dark"] .delle-proposal-shell .validated-summary{
+  background:#342c1c!important;
+  border-color:#705c26!important;
+  color:#ffe8a3!important;
+}
