@@ -4,17 +4,28 @@ import {
   getAuth, signInAnonymously, onAuthStateChanged, setPersistence, browserLocalPersistence
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
 import {
-  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch, runTransaction,
-  onSnapshot, serverTimestamp
+  getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch, runTransaction,
+  onSnapshot, serverTimestamp, query, where, documentId
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
+import {
+  HISTORY_LIVE_START, makeArchiveBaseline, splitBaselineParts, combineBaselineParts,
+  isValidBaseline, selectFreshBaseline, applyArchiveBaseline, replaceLiveEntries
+} from './quota-core.mjs';
 const ENV = globalThis.COVOIT_ENV || {};
 const firebaseConfig = ENV.firebaseConfig || {};
-const APP_VERSION = ENV.version || '4.7.0';
+const APP_VERSION = ENV.version || '4.8.0';
 const IS_TEST = ENV.environment === 'test';
 const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+let db;
+try{
+  db=initializeFirestore(app,{localCache:persistentLocalCache({tabManager:persistentMultipleTabManager()})});
+}catch(e){
+  console.warn('Cache Firestore persistant indisponible, repli mémoire.',e);
+  db=getFirestore(app);
+}
 let messaging = null;
 let messagingSwRegistration = null;
 let currentFcmToken = null;
@@ -57,6 +68,119 @@ let delleTrips = new Map();
 let delleTripsReady = false;
 let delleTripsError = '';
 let delleUnsubscribe = null;
+
+// Quota-safe : les données historiques (avant septembre 2026) sont compactées
+// dans 5 petits documents de configuration. Les collections volumineuses ne sont
+// ensuite écoutées en temps réel que pour la période récente.
+const QUOTA_BASELINE_DOC_IDS={
+  meta:'quotaBaselineMetaV1',trips:'quotaBaselineTripsV1',availability:'quotaBaselineAvailabilityV1',
+  legacyStatus:'quotaBaselineLegacyV1',plans:'quotaBaselinePlansV1'
+};
+const QUOTA_DIRTY_PLAN_ID='_quotaBaselineDirtyV1';
+const QUOTA_LOCAL_KEY=`covoiturage:${firebaseConfig.projectId}:quotaBaselineV1`;
+let quotaBaseline=null;
+let quotaBaselineReady=false;
+let quotaBaselinePromise=null;
+let quotaBaselineRebuildTimer=null;
+
+const snapshotEntries=snap=>snap.docs.map(d=>[d.id,d.data()]);
+const plainDocs=snap=>snap.docs.map(d=>({id:d.id,data:d.data()}));
+const liveCollection=name=>query(collection(db,name),where(documentId(),'>=',HISTORY_LIVE_START));
+const archiveCollection=name=>query(collection(db,name),where(documentId(),'<',HISTORY_LIVE_START));
+
+function applyQuotaBaseline(baseline){
+  if(!isValidBaseline(baseline,HISTORY_LIVE_START))throw new Error('Baseline historique invalide.');
+  applyArchiveBaseline(baseline,{tripDays,availability,legacyStatus,plans});
+  quotaBaseline=baseline;quotaBaselineReady=true;
+  try{localStorage.setItem(QUOTA_LOCAL_KEY,JSON.stringify(baseline));}catch(e){console.warn('Cache historique local',e);}
+  console.info('[quota-safe] baseline prête',baseline.counts||{});
+  return baseline;
+}
+function readLocalQuotaBaseline(){
+  try{const raw=localStorage.getItem(QUOTA_LOCAL_KEY);if(!raw)return null;const b=JSON.parse(raw);return isValidBaseline(b,HISTORY_LIVE_START)?b:null;}catch(e){return null;}
+}
+async function readServerQuotaBaseline(){
+  const names=Object.keys(QUOTA_BASELINE_DOC_IDS);
+  const snaps=await Promise.all(names.map(name=>getDoc(doc(db,'config',QUOTA_BASELINE_DOC_IDS[name]))));
+  if(snaps.some(x=>!x.exists()))return null;
+  const parts=Object.fromEntries(names.map((name,i)=>[name,snaps[i].data()]));
+  // Au premier lancement d'un nouveau mois, la baseline du mois précédent
+  // est volontairement ignorée puis reconstruite avec la nouvelle frontière.
+  if(Object.values(parts).some(part=>part?.liveStart!==HISTORY_LIVE_START))return null;
+  return combineBaselineParts(parts,HISTORY_LIVE_START);
+}
+async function publishQuotaBaseline(baseline){
+  if(linkedProfileId!=='igor')return false;
+  const parts=splitBaselineParts(baseline),batch=writeBatch(db);
+  for(const [name,id] of Object.entries(QUOTA_BASELINE_DOC_IDS))batch.set(doc(db,'config',id),{...parts[name],updatedAt:serverTimestamp()});
+  await batch.commit();return true;
+}
+async function rebuildQuotaBaseline({publish=true}={}){
+  const [tripSnap,availSnap,legacySnap,planSnap]=await Promise.all([
+    getDocs(archiveCollection('tripDays')),getDocs(archiveCollection('availability')),
+    getDocs(archiveCollection('legacyStatus')),getDocs(archiveCollection('plans'))
+  ]);
+  const now=Date.now();
+  const baseline=makeArchiveBaseline({
+    tripDaysDocs:plainDocs(tripSnap),availabilityDocs:plainDocs(availSnap),legacyStatusDocs:plainDocs(legacySnap),plansDocs:plainDocs(planSnap),
+    liveStart:HISTORY_LIVE_START,generatedAtMs:now,generation:`${now}-${authUser?.uid?.slice(0,8)||'local'}`
+  });
+  applyQuotaBaseline(baseline);
+  if(publish&&linkedProfileId==='igor'){
+    try{await publishQuotaBaseline(baseline);}
+    catch(e){
+      console.warn('Publication de la baseline différée : la copie locale reste utilisable.',e);
+      setTimeout(()=>publishQuotaBaseline(baseline).catch(err=>console.warn('Nouvelle tentative de publication baseline',err)),1500);
+    }
+  }
+  return baseline;
+}
+const quotaDirtyRef=()=>doc(db,'plans',QUOTA_DIRTY_PLAN_ID);
+async function readQuotaDirtyAtMs(){
+  const snap=await getDoc(quotaDirtyRef());
+  return snap.exists()?Number(snap.data()?.dirtyAtMs||0):0;
+}
+async function markQuotaBaselineDirty(dirtyAtMs=Date.now()){
+  await setDoc(quotaDirtyRef(),{quotaBaselineDirty:true,dirtyAtMs,updatedBy:profileId||linkedProfileId||null,updatedAt:serverTimestamp()},{merge:true});
+  return dirtyAtMs;
+}
+async function ensureQuotaBaseline(){
+  if(quotaBaselinePromise)return quotaBaselinePromise;
+  quotaBaselinePromise=(async()=>{
+    const local=readLocalQuotaBaseline();if(local)applyQuotaBaseline(local);
+    try{
+      const [server,dirtyAtMs]=await Promise.all([readServerQuotaBaseline(),readQuotaDirtyAtMs()]);
+      const freshest=selectFreshBaseline(local,server,dirtyAtMs,HISTORY_LIVE_START);
+      if(freshest){
+        if(!local||freshest.generation!==local.generation)applyQuotaBaseline(freshest);
+        if(!server&&linkedProfileId==='igor')setTimeout(()=>publishQuotaBaseline(freshest).catch(err=>console.warn('Publication baseline locale',err)),0);
+        return freshest;
+      }
+      return await rebuildQuotaBaseline({publish:linkedProfileId==='igor'});
+    }catch(e){
+      const recovered=readLocalQuotaBaseline();
+      if(recovered){
+        applyQuotaBaseline(recovered);
+        console.warn('Baseline serveur indisponible au démarrage, récupération locale réussie.',e);
+        if(linkedProfileId==='igor')setTimeout(()=>publishQuotaBaseline(recovered).catch(err=>console.warn('Publication baseline récupérée',err)),0);
+        return recovered;
+      }
+      throw e;
+    }
+  })();
+  try{return await quotaBaselinePromise;}finally{quotaBaselinePromise=null;}
+}
+function scheduleQuotaBaselineRebuild(date){
+  if(!date||date>=HISTORY_LIVE_START)return;
+  const dirtyAtMs=Date.now();
+  const dirtyWrite=markQuotaBaselineDirty(dirtyAtMs).catch(e=>{console.warn('Marqueur historique',e);return dirtyAtMs;});
+  if(linkedProfileId!=='igor')return;
+  clearTimeout(quotaBaselineRebuildTimer);
+  quotaBaselineRebuildTimer=setTimeout(async()=>{
+    await dirtyWrite;
+    await rebuildQuotaBaseline({publish:true}).catch(e=>console.warn('Rebuild baseline historique',e));
+  },900);
+}
 
 const $ = id => document.getElementById(id);
 const qsa = sel => [...document.querySelectorAll(sel)];
@@ -177,8 +301,17 @@ function launchLinkedApp(){
   $('identityName').textContent=label(profileId);
   initStaticUI();
   initSettingsUI();
-  subscribeSharedData();
-  subscribeDellePrivate();
+  setLoading('Optimisation des données…','Préparation de l’historique local.');
+  ensureQuotaBaseline().then(()=>{
+    subscribeSharedData();
+    subscribeDellePrivate();
+  }).catch(err=>{
+    console.error('Quota baseline',err);
+    showConnectionAlert('Historique optimisé indisponible · mode de secours');
+    quotaBaselineReady=false;
+    subscribeSharedData();
+    subscribeDellePrivate();
+  });
 }
 
 function initAccessUI(){
@@ -304,11 +437,16 @@ function subscribeSharedData(){
   let initialRendered=false;
   let deferredStarted=false;
   const criticalNames=['profiles','availability','compatibilities','plans','preferences','calendar'];
+  const largeRef=name=>quotaBaselineReady?liveCollection(name):collection(db,name);
+  const mergeOrReplace=(map,snap)=>{
+    if(quotaBaselineReady)replaceLiveEntries(map,snapshotEntries(snap),HISTORY_LIVE_START);
+    else{map.clear();snapshotEntries(snap).forEach(([id,data])=>map.set(id,data));}
+  };
   const startDeferred=()=>{
     if(deferredStarted)return;
     deferredStarted=true;
     const begin=()=>{
-      watch('legacyStatus',collection(db,'legacyStatus'),snap=>{ legacyStatus=new Map(snap.docs.map(d=>[d.id,d.data()])); legacyStatusReady=true; });
+      watch('legacyStatus',largeRef('legacyStatus'),snap=>{mergeOrReplace(legacyStatus,snap);legacyStatusReady=true;});
     };
     if('requestIdleCallback' in window) requestIdleCallback(begin,{timeout:1200});
     else setTimeout(begin,150);
@@ -316,27 +454,19 @@ function subscribeSharedData(){
   const completeInitial=()=>{
     if(initialRendered || !criticalNames.every(name=>initializedSnapshots.has(name)))return;
     initialRendered=true;
-    applyTheme();
-    renderTomorrow();
-    renderSettings();
-    hideLoading();
-    startDeferred();
+    applyTheme();renderTomorrow();renderSettings();hideLoading();startDeferred();
   };
   const watch=(name,ref,handler)=>{
-    const off=onSnapshot(ref,snap=>{
-      handler(snap); initializedSnapshots.add(name); completeInitial(); if(initialRendered)refreshForData(name);
-    },err=>{console.error(name,err);showConnectionAlert('Erreur de synchronisation');});
+    const off=onSnapshot(ref,snap=>{handler(snap);initializedSnapshots.add(name);completeInitial();if(initialRendered)refreshForData(name);},err=>{console.error(name,err);showConnectionAlert('Erreur de synchronisation');});
     unsubscribers.push(off);
   };
-  // Les compteurs de rotation sont nécessaires à la proposition : on les charge immédiatement,
-  // sans les rendre bloquants pour l'affichage initial de la page.
-  watch('tripDays',collection(db,'tripDays'),snap=>{ tripDays=new Map(snap.docs.map(d=>[d.id,d.data()])); tripDaysReady=true; });
-  watch('profiles',collection(db,'profiles'),snap=>{ profiles=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  watch('availability',collection(db,'availability'),snap=>{ availability=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  watch('compatibilities',collection(db,'compatibilities'),snap=>{ compatibilities=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  watch('plans',collection(db,'plans'),snap=>{ plans=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  watch('preferences',collection(db,'preferences'),snap=>{ preferences=new Map(snap.docs.map(d=>[d.id,d.data()])); });
-  const offCalendar=onSnapshot(doc(db,'config','calendar'),snap=>{ calendarConfig=snap.exists()?snap.data():{exceptions:[]}; initializedSnapshots.add('calendar'); completeInitial(); if(initialRendered)refreshForData('calendar'); },err=>{console.error('calendar',err); initializedSnapshots.add('calendar'); completeInitial();});
+  watch('tripDays',largeRef('tripDays'),snap=>{mergeOrReplace(tripDays,snap);tripDaysReady=true;});
+  watch('profiles',collection(db,'profiles'),snap=>{profiles=new Map(snap.docs.map(d=>[d.id,d.data()]));});
+  watch('availability',largeRef('availability'),snap=>{mergeOrReplace(availability,snap);});
+  watch('compatibilities',largeRef('compatibilities'),snap=>{mergeOrReplace(compatibilities,snap);});
+  watch('plans',largeRef('plans'),snap=>{mergeOrReplace(plans,snap);});
+  watch('preferences',collection(db,'preferences'),snap=>{preferences=new Map(snap.docs.map(d=>[d.id,d.data()]));});
+  const offCalendar=onSnapshot(doc(db,'config','calendar'),snap=>{calendarConfig=snap.exists()?snap.data():{exceptions:[]};initializedSnapshots.add('calendar');completeInitial();if(initialRendered)refreshForData('calendar');},err=>{console.error('calendar',err);initializedSnapshots.add('calendar');completeInitial();});
   unsubscribers.push(offCalendar);
 }
 
@@ -401,7 +531,7 @@ async function setAvailability(date,status,time=null){
   toast(`${fmtDate(date,{weekday:'short',day:'numeric',month:'short'})} : ${statusMeta(optimistic).label} · enregistrement…`);
   try{
     await setDoc(doc(db,'availability',key),{...optimistic,updatedAt:serverTimestamp()});
-    toast('✓ Enregistré');
+    scheduleQuotaBaselineRebuild(date);toast('✓ Enregistré');
   }catch(e){
     if(previous)availability.set(key,previous);else availability.delete(key);
     refreshForData('availability'); alert(friendlyError(e));
@@ -409,7 +539,7 @@ async function setAvailability(date,status,time=null){
 }
 async function clearAvailability(date){
   const key=availKey(date,profileId),previous=availability.get(key); availability.delete(key); refreshForData('availability'); toast('Saisie supprimée · enregistrement…');
-  try{await deleteDoc(doc(db,'availability',key));toast('✓ Enregistré');}catch(e){if(previous)availability.set(key,previous);refreshForData('availability');alert(friendlyError(e));}
+  try{await deleteDoc(doc(db,'availability',key));scheduleQuotaBaselineRebuild(date);toast('✓ Enregistré');}catch(e){if(previous)availability.set(key,previous);refreshForData('availability');alert(friendlyError(e));}
 }
 
 function renderAll(){
@@ -539,9 +669,17 @@ function renderPlanning(){
 async function applyRange(){
   const a=$('rangeStart').value,b=$('rangeEnd').value,st=$('rangeStatus').value,tm=$('rangeTime').value;
   if(!a||!b||a>b){alert('Vérifie les dates.');return;}
-  const jobs=[];let d=fromISO(a),end=fromISO(b),n=0;
-  while(d<=end){const ds=iso(d);if(isWorkingDayISO(ds)){jobs.push(setDoc(doc(db,'availability',availKey(ds,profileId)),{date:ds,profileId,status:st,time:st==='time'?tm:null,updatedAt:serverTimestamp(),updatedByUid:authUser.uid}));n++;}d=addDays(d,1);}
-  try{await Promise.all(jobs);toast(`${n} jour(s) renseigné(s).`);}catch(e){alert(friendlyError(e));}
+  const jobs=[];let d=fromISO(a),end=fromISO(b),n=0,archiveTouched=false,firstArchiveDate=null;
+  while(d<=end){
+    const ds=iso(d);
+    if(isWorkingDayISO(ds)){
+      jobs.push(setDoc(doc(db,'availability',availKey(ds,profileId)),{date:ds,profileId,status:st,time:st==='time'?tm:null,updatedAt:serverTimestamp(),updatedByUid:authUser.uid}));
+      if(ds<HISTORY_LIVE_START){archiveTouched=true;firstArchiveDate=firstArchiveDate||ds;}
+      n++;
+    }
+    d=addDays(d,1);
+  }
+  try{await Promise.all(jobs);if(archiveTouched)scheduleQuotaBaselineRebuild(firstArchiveDate);toast(`${n} jour(s) renseigné(s).`);}catch(e){alert(friendlyError(e));}
 }
 
 function currentPlan(date){ return plans.get(date)?.groups || []; }
@@ -652,7 +790,7 @@ async function savePlan(date,groups){
   const previous=plans.get(date); const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver}));
   plans.set(date,{date,groups:normalized,updatedBy:profileId});
   if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups'))renderGroups();
-  try{await setDoc(doc(db,'plans',date),{date,groups:normalized,updatedAt:serverTimestamp(),updatedBy:profileId});}
+  try{await setDoc(doc(db,'plans',date),{date,groups:normalized,updatedAt:serverTimestamp(),updatedBy:profileId});scheduleQuotaBaselineRebuild(date);}
   catch(e){if(previous)plans.set(date,previous);else plans.delete(date);refreshForData('plans');throw e;}
 }
 function renderDraftGroups(ds){
@@ -718,7 +856,7 @@ async function validateSingleGroupForDate(ds,g,planGroups=[]){
   tripDays.set(ds,{date:ds,groups:merged,source:IS_TEST?'test':'app',updatedBy:profileId});
   plans.set(ds,{date:ds,groups:normalizedPlan,updatedBy:profileId});
   if(activePage('tomorrow'))renderTomorrow();if(activePage('groups')){renderGroups();renderValidatedInfo(ds);}if(activePage('history')){renderSummary();renderHistory();}
-  toast(`✓ Groupe ${members.map(label).join(' · ')} enregistré`);
+  scheduleQuotaBaselineRebuild(ds);toast(`✓ Groupe ${members.map(label).join(' · ')} enregistré`);
 }
 async function validateTrips(){
   const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;
@@ -745,7 +883,7 @@ async function deleteHistoryGroup(date,id){
   toast('Trajet supprimé · enregistrement…');
   try{
     if(groups.length)await setDoc(doc(db,'tripDays',date),{...day,groups,updatedAt:serverTimestamp(),updatedBy:profileId});else await deleteDoc(doc(db,'tripDays',date));
-    toast('✓ Trajet supprimé');
+    scheduleQuotaBaselineRebuild(date);toast('✓ Trajet supprimé');
   }catch(e){tripDays.set(date,previous);refreshForData('tripDays');alert(friendlyError(e));}
 }
 
@@ -1268,7 +1406,7 @@ async function validateGroupsForDate(ds,groups){
   const existing=tripDays.get(ds),same=existing?.groups?.length&&normalizedGroupSignature(existing.groups)===normalizedGroupSignature(groups);if(existing?.groups?.length&&!same&&!confirm(`Des trajets sont déjà validés pour ${fmtDate(ds)}. Les remplacer ?`))return;
   const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver,source:IS_TEST?'test':'app'})); const previousTrip=tripDays.get(ds),previousPlan=plans.get(ds);
   tripDays.set(ds,{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedBy:profileId}); plans.set(ds,{date:ds,groups:normalized,updatedBy:profileId}); if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups')){renderGroups();renderValidatedInfo(ds);} if(activePage('history')){renderSummary();renderHistory();}
-  try{await Promise.all([setDoc(doc(db,'tripDays',ds),{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedAt:serverTimestamp(),updatedBy:profileId}),setDoc(doc(db,'plans',ds),{date:ds,groups:normalized,validatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:profileId})]);toast('✓ Trajet enregistré');}
+  try{await Promise.all([setDoc(doc(db,'tripDays',ds),{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedAt:serverTimestamp(),updatedBy:profileId}),setDoc(doc(db,'plans',ds),{date:ds,groups:normalized,validatedAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:profileId})]);scheduleQuotaBaselineRebuild(ds);toast('✓ Trajet enregistré');}
   catch(e){if(previousTrip)tripDays.set(ds,previousTrip);else tripDays.delete(ds);if(previousPlan)plans.set(ds,previousPlan);else plans.delete(ds);refreshForData('tripDays');refreshForData('plans');throw e;}
 }
 
@@ -1280,7 +1418,7 @@ async function resetTestTrip(ds){
   toast('🧪 Trajet TEST réinitialisé · enregistrement…');
   try{
     await Promise.all([deleteDoc(doc(db,'tripDays',ds)),deleteDoc(doc(db,'plans',ds))]);
-    toast('✓ Prêt pour un nouveau test');
+    scheduleQuotaBaselineRebuild(ds);toast('✓ Prêt pour un nouveau test');
   }catch(e){
     if(previousTrip)tripDays.set(ds,previousTrip);
     if(previousPlan)plans.set(ds,previousPlan);
@@ -1310,7 +1448,8 @@ function downloadJson(data,name){const blob=new Blob([JSON.stringify(data,(k,v)=
 async function importTestSnapshot(){
   if(!IS_TEST||linkedProfileId!=='igor')return;const f=$('testSnapshotFile').files?.[0];if(!f){alert('Choisis le fichier de copie TEST.');return;}const payload=JSON.parse(await f.text());if(!confirm('Remplacer les données métier de la base TEST par cette copie ?'))return;
   for(const name of SNAPSHOT_COLLECTIONS){const old=await getDocs(collection(db,name));for(let i=0;i<old.docs.length;i+=400){const b=writeBatch(db);old.docs.slice(i,i+400).forEach(d=>b.delete(d.ref));await b.commit();}const recs=payload.collections?.[name]||[];for(let i=0;i<recs.length;i+=400){const b=writeBatch(db);recs.slice(i,i+400).forEach(r=>b.set(doc(db,name,r.id),r.data));await b.commit();}}
-  await setDoc(doc(db,'config','calendar'),payload.calendar||{exceptions:[]});toast('Base TEST actualisée.');
+  await setDoc(doc(db,'config','calendar'),payload.calendar||{exceptions:[]});
+  await rebuildQuotaBaseline({publish:true});toast('Base TEST actualisée · historique optimisé recalculé.');
 }
 async function installPwa(){
   if(installPrompt){installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;$('installBtn').style.display='none';return;}
