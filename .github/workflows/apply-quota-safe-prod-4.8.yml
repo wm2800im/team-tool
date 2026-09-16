@@ -1,0 +1,165 @@
+name: Apply quota-safe PROD 4.8
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-quota-safe-prod-4.8.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  promote-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Promote exact validated TEST beta4 core
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_SHA='2cded245dec22e5300f7e7d7a7d33f412f804754'
+          BASE="https://raw.githubusercontent.com/wm2800im/team-tool-test/${TEST_SHA}"
+          curl -fsSL --retry 3 "$BASE/app.js" -o /tmp/app.js
+          curl -fsSL --retry 3 "$BASE/quota-core.mjs" -o quota-core.mjs
+          mkdir -p tests
+          curl -fsSL --retry 3 "$BASE/tests/quota-core.test.mjs" -o tests/quota-core.test.mjs
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # app.js = code exact de la beta4 validée, seule la version de repli change.
+          src=Path('/tmp/app.js').read_text(encoding='utf-8')
+          marker="const APP_VERSION = ENV.version || '4.8.0-beta.4';"
+          if src.count(marker)!=1:
+              raise SystemExit('Version beta4 inattendue dans app.js TEST')
+          src=src.replace(marker,"const APP_VERSION = ENV.version || '4.8.0';",1)
+          Path('app.js').write_text(src,encoding='utf-8')
+
+          # Configuration PROD : ne jamais copier la configuration Firebase TEST.
+          p=Path('public-config.js')
+          cfg=p.read_text(encoding='utf-8')
+          if cfg.count('version: "4.7.0"')!=1:
+              raise SystemExit('Version PROD de départ inattendue')
+          cfg=cfg.replace('version: "4.7.0"','version: "4.8.0"',1)
+          p.write_text(cfg,encoding='utf-8')
+
+          # Service worker : nouveau cache + ajout du module quota-core au shell offline.
+          p=Path('service-worker.js')
+          sw=p.read_text(encoding='utf-8')
+          if sw.count("const CACHE='covoiturage-4.7.0';")!=1:
+              raise SystemExit('Cache PROD de départ inattendu')
+          sw=sw.replace("const CACHE='covoiturage-4.7.0';","const CACHE='covoiturage-4.8.0';",1)
+          old="'./styles.css','./app.js','./public-config.js'"
+          new="'./styles.css','./app.js','./quota-core.mjs','./public-config.js'"
+          if sw.count(old)!=1:
+              raise SystemExit('Shell service worker inattendu')
+          sw=sw.replace(old,new,1)
+          p.write_text(sw,encoding='utf-8')
+          PY
+
+      - name: Syntax and whitespace checks
+        run: |
+          set -euo pipefail
+          node --check app.js
+          node --check quota-core.mjs
+          node --check public-config.js
+          node --check service-worker.js
+          node --check notify-runner.mjs
+          git diff --check
+
+      - name: Run full quota-safe unit suite
+        run: node --test tests/quota-core.test.mjs
+
+      - name: Verify production invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          app=Path('app.js').read_text(encoding='utf-8')
+          core=Path('quota-core.mjs').read_text(encoding='utf-8')
+          cfg=Path('public-config.js').read_text(encoding='utf-8')
+          sw=Path('service-worker.js').read_text(encoding='utf-8')
+          styles=Path('styles.css').read_text(encoding='utf-8')
+
+          checks={
+            'prod environment':'environment: "production"' in cfg,
+            'prod version':'version: "4.8.0"' in cfg,
+            'prod project':'projectId: "team-tool-data"' in cfg,
+            'no TEST project':'team-tool-test-data' not in cfg+app,
+            'prod VAPID preserved':'BDY_aON4z7uM561jtiX4WeQ7cWbagvuA0M7eP1c_b540_bXALoiwGEAsSvqVMWJwsRM5Jll6Gx6PwqX3eLleVSE' in cfg,
+            'app prod fallback':"APP_VERSION = ENV.version || '4.8.0'" in app,
+            'persistent cache':'persistentLocalCache' in app and 'persistentMultipleTabManager' in app,
+            'monthly rolling window':'historyLiveStartFor' in core and 'getMonth()+1' in core,
+            'archive selection':'selectFreshBaseline' in app and 'selectFreshBaseline' in core,
+            'recent tripDays listener':"largeRef('tripDays')" in app,
+            'recent availability listener':"largeRef('availability')" in app,
+            'recent legacy listener':"largeRef('legacyStatus')" in app,
+            'recent plans listener':"largeRef('plans')" in app,
+            'no direct full trip listener':"watch('tripDays',collection(db,'tripDays')" not in app,
+            'no direct full availability listener':"watch('availability',collection(db,'availability')" not in app,
+            'no direct full legacy listener':"watch('legacyStatus',collection(db,'legacyStatus')" not in app,
+            'no direct full plans listener':"watch('plans',collection(db,'plans')" not in app,
+            'historical dirty marker':"QUOTA_DIRTY_PLAN_ID='_quotaBaselineDirtyV1'" in app,
+            'Delle preserved':'Covoiturage jusqu’à Delle' in app,
+            'notification UX preserved':'Test envoyé. Vérifie la notification sur cet appareil.' in app,
+            'service worker cache':"const CACHE='covoiturage-4.8.0'" in sw,
+            'quota module offline':'./quota-core.mjs' in sw,
+            'main stylesheet present':len(styles)>1000,
+          }
+          failed=[name for name,ok in checks.items() if not ok]
+          for name,ok in checks.items(): print(('OK  ' if ok else 'FAIL')+name)
+          if failed: raise SystemExit('Contrôles PROD échoués: '+', '.join(failed))
+          PY
+
+      - name: Verify Firebase 12.18 browser exports
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js -o /tmp/firestore.js
+          for symbol in persistentLocalCache persistentMultipleTabManager documentId initializeFirestore query where; do
+            grep -q "$symbol" /tmp/firestore.js
+          done
+
+      - name: Commit production 4.8.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.js quota-core.mjs tests/quota-core.test.mjs public-config.js service-worker.js
+          git commit -m 'perf(prod): quota-safe Firestore access 4.8.0'
+          git push origin HEAD:main
+
+      - name: Smoke test deployed GitHub Pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://wm2800im.github.io/team-tool'
+          ok=0
+          for i in $(seq 1 24); do
+            stamp=$(date +%s)
+            if curl -fsSL --max-time 15 "$BASE/public-config.js?v=$stamp" -o /tmp/live-config.js \
+              && curl -fsSL --max-time 15 "$BASE/app.js?v=$stamp" -o /tmp/live-app.js \
+              && curl -fsSL --max-time 15 "$BASE/quota-core.mjs?v=$stamp" -o /tmp/live-core.mjs \
+              && curl -fsSL --max-time 15 "$BASE/service-worker.js?v=$stamp" -o /tmp/live-sw.js \
+              && grep -q 'version: "4.8.0"' /tmp/live-config.js \
+              && grep -q 'projectId: "team-tool-data"' /tmp/live-config.js \
+              && ! grep -q 'team-tool-test-data' /tmp/live-config.js \
+              && grep -q "APP_VERSION = ENV.version || '4.8.0'" /tmp/live-app.js \
+              && grep -q 'selectFreshBaseline' /tmp/live-app.js \
+              && grep -q 'historyLiveStartFor' /tmp/live-core.mjs \
+              && grep -q "covoiturage-4.8.0" /tmp/live-sw.js \
+              && grep -q './quota-core.mjs' /tmp/live-sw.js; then
+                ok=1; break
+            fi
+            echo "Pages pas encore à jour (tentative $i/24)"
+            sleep 10
+          done
+          test "$ok" = 1
+          echo 'Smoke test GitHub Pages PROD 4.8.0: OK'
