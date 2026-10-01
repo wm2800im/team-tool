@@ -14,7 +14,7 @@ import {
 } from './quota-core.mjs';
 const ENV = globalThis.COVOIT_ENV || {};
 const firebaseConfig = ENV.firebaseConfig || {};
-const APP_VERSION = ENV.version || '4.8.0';
+const APP_VERSION = ENV.version || '4.8.1';
 const IS_TEST = ENV.environment === 'test';
 const VAPID_KEY = ENV.vapidKey || '';
 const app = initializeApp(firebaseConfig);
@@ -480,7 +480,7 @@ function initStaticUI(){
   $('saveTime').addEventListener('click',()=>setAvailability(nextCarpoolISO(),'time',$('timeLimit').value));
   $('rangeStatus').addEventListener('change',()=>{$('rangeTimeField').style.display=$('rangeStatus').value==='time'?'flex':'none';});
   $('applyRange').addEventListener('click',applyRange); $('groupDate').addEventListener('change',renderGroups); $('addGroup').addEventListener('click',addSelectedGroup); $('validateTrips').addEventListener('click',validateTrips);
-  $('summaryPeriod').addEventListener('change',()=>{renderSummary();renderHistory();}); $('historyFilter').addEventListener('input',renderHistory); $('exportHistory').addEventListener('click',exportHistoryCSV); $('installBtn').addEventListener('click',installPwa);
+  $('summaryPeriod').addEventListener('change',()=>{renderSummary();renderHistory();}); $('historyFilter').addEventListener('input',renderHistory); $('groupBalanceFilter')?.addEventListener('input',()=>renderGroupCounterSummary(flattenTrips())); $('exportHistory').addEventListener('click',exportHistoryCSV); $('installBtn').addEventListener('click',installPwa);
   $('menuBtn').addEventListener('click',openSettingsMenu); $('closeMenuBtn').addEventListener('click',closeSettingsMenu); $('menuBackdrop').addEventListener('click',closeSettingsMenu); $('openAdminBtn').addEventListener('click',()=>{closeSettingsMenu();openPage('admin');});
   $('aboutToggle').addEventListener('click',()=>{const details=$('aboutDetails');const open=details.style.display!=='none';details.style.display=open?'none':'block';$('aboutToggle').classList.toggle('open',!open);});
   $('donateBtn').addEventListener('click',()=>{const el=$('coffeeThanks');if(el){el.style.display='block';setTimeout(()=>{el.style.display='none';},3500);}});
@@ -911,18 +911,96 @@ function renderHistory(){
   if(!tripDaysReady){
     $('historyCount').textContent='…';
     $('historyList').innerHTML='<div class="empty">Chargement de l’historique…</div>';
+    if($('groupBalanceList'))$('groupBalanceList').innerHTML='<div class="empty">Chargement du bilan…</div>';
+    if($('groupBalanceCount'))$('groupBalanceCount').textContent='…';
     return;
   }
-  const raw=flattenTrips(),counterSnapshots=buildHistoryCounterSnapshots(raw),all=[...raw].sort((a,b)=>b.date.localeCompare(a.date)); $('historyCount').textContent=all.length; renderQualityChecks(all);
+  const raw=flattenTrips(),counterSnapshots=buildHistoryCounterSnapshots(raw),all=[...raw].sort((a,b)=>b.date.localeCompare(a.date)); $('historyCount').textContent=all.length; renderQualityChecks(all); renderGroupCounterSummary(raw);
   const q=($('historyFilter').value||'').trim().toLowerCase();let ts=all; if(q)ts=ts.filter(t=>`${t.date} ${groupCode(t.participants)} ${canonical(t.participants).map(label).join(' ')} ${label(t.driver)}`.toLowerCase().includes(q)); ts=ts.slice(0,300);
   $('historyList').innerHTML=ts.map(t=>{const counts=counterSnapshots.get(`${t.date}|${t.id}`)||{};return `<div class="hist-row"><div>${t.date}</div><div><strong>${groupCode(t.participants)}</strong> · ${canonical(t.participants).map(label).join(', ')}</div><div class="driver">🚗 ${label(t.driver)}</div><div class="hist-actions"><button class="btn secondary smallbtn edit-trip" data-date="${t.date}">Modifier</button><button class="btn danger smallbtn delete-trip" data-date="${t.date}" data-id="${t.id}">Suppr.</button></div><div class="hist-counter">Compteurs après ce trajet : ${canonical(t.participants).map(p=>`${label(p)} <strong>${counts[p]||0}</strong>`).join(' · ')}</div></div>`;}).join('')||'<div class="empty">Aucun résultat.</div>';
   $('historyList').querySelectorAll('.edit-trip').forEach(b=>b.addEventListener('click',()=>loadValidatedIntoPlan(b.dataset.date))); $('historyList').querySelectorAll('.delete-trip').forEach(b=>b.addEventListener('click',()=>deleteHistoryGroup(b.dataset.date,b.dataset.id)));
 }
+function buildCurrentGroupCounters(trips){
+  const counters=new Map();
+  trips.forEach(t=>{
+    const members=canonical(t.participants),key=members.join('|');
+    let counts=counters.get(key);
+    if(!counts){counts=Object.fromEntries(members.map(p=>[p,0]));counters.set(key,counts);}
+    if(t.driver in counts)counts[t.driver]++;
+  });
+  return counters;
+}
+function currentGroupCounterSummary(trips){
+  return [...buildCurrentGroupCounters(trips).entries()].map(([key,counts])=>{
+    const members=key.split('|').filter(Boolean);
+    return {members,code:groupCode(members),counts};
+  }).sort((a,b)=>a.members.length-b.members.length||a.code.localeCompare(b.code,'fr'));
+}
+function groupBalanceFilterLetters(value){
+  const valid=new Set(PEOPLE.map(p=>INITIAL[p]).filter(Boolean));
+  return [...new Set(String(value||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').split('').filter(ch=>valid.has(ch)))];
+}
+function groupBalanceMatches(code,value){
+  const letters=groupBalanceFilterLetters(value);
+  if(!letters.length)return false;
+  const normalized=String(code||'').toUpperCase();
+  return letters.every(ch=>normalized.includes(ch));
+}
+function renderGroupCounterSummary(trips){
+  const host=$('groupBalanceList'),countHost=$('groupBalanceCount'),filter=$('groupBalanceFilter');
+  if(!host)return;
+  const rawFilter=filter?.value||'';
+  const letters=groupBalanceFilterLetters(rawFilter);
+  if(!letters.length){
+    if(countHost)countHost.textContent='—';
+    host.innerHTML='<div class="empty">Tape une ou plusieurs initiales : A, E, I, L ou S.</div>';
+    return;
+  }
+  const summaries=currentGroupCounterSummary(trips).filter(item=>groupBalanceMatches(item.code,rawFilter));
+  if(countHost)countHost.textContent=`${summaries.length} groupe${summaries.length>1?'s':''}`;
+  if(!summaries.length){
+    host.innerHTML=`<div class="empty">Aucun groupe ne contient ${letters.join(' · ')}.</div>`;
+    return;
+  }
+  const sections=new Map();
+  summaries.forEach(item=>{
+    const size=item.members.length;
+    if(!sections.has(size))sections.set(size,[]);
+    sections.get(size).push(item);
+  });
+  host.innerHTML=[...sections.entries()].map(([size,items])=>{
+    const title=size===2?'Binômes':`Groupes de ${size}`;
+    const cards=items.map(({members,code,counts})=>`
+      <div class="group-balance-card">
+        <div class="group-balance-card-head">
+          <strong class="group-balance-code">${code}</strong>
+          <span class="small muted">${members.map(label).join(' · ')}</span>
+        </div>
+        <div class="group-balance-values">
+          ${members.map(p=>`<div class="group-balance-value"><span>${label(p)}</span><strong>${counts[p]||0}</strong></div>`).join('')}
+        </div>
+      </div>`).join('');
+    return `<section class="group-balance-section"><div class="group-balance-section-title">${title}</div><div class="group-balance-grid">${cards}</div></section>`;
+  }).join('');
+}
 function exportHistoryCSV(){
+  const trips=flattenTrips().sort((a,b)=>a.date.localeCompare(b.date)||String(a.id).localeCompare(String(b.id)));
+  const currentCounters=buildCurrentGroupCounters(trips);
   const rows=[['Date','Groupe','Participants','Conducteur','Source']];
-  flattenTrips().sort((a,b)=>a.date.localeCompare(b.date)).forEach(t=>rows.push([t.date,groupCode(t.participants),canonical(t.participants).map(label).join(' + '),label(t.driver),t.source||'']));
+  trips.forEach(t=>rows.push([t.date,groupCode(t.participants),canonical(t.participants).map(label).join(' + '),label(t.driver),t.source||'']));
+
+  // Bilan global : une ligne par composition exacte de groupe et une colonne par personne.
+  rows.push([]);
+  rows.push(['BILAN GLOBAL DES COMPTEURS ACTUELS']);
+  rows.push(['Groupe',...PEOPLE.map(label)]);
+  const summaries=[...currentCounters.entries()].map(([key,counts])=>{
+    const members=key.split('|').filter(Boolean);
+    return {code:groupCode(members),counts};
+  }).sort((a,b)=>a.code.length-b.code.length||a.code.localeCompare(b.code,'fr'));
+  summaries.forEach(({code,counts})=>rows.push([code,...PEOPLE.map(p=>Object.prototype.hasOwnProperty.call(counts,p)?counts[p]:'')]));
+
   const esc=v=>`"${String(v??'').replaceAll('"','""')}"`;const csv='\ufeff'+rows.map(r=>r.map(esc).join(';')).join('\r\n');
-  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`Historique_Covoiturage_${iso(new Date())}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Historique exporté.');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`Historique_Covoiturage_${iso(new Date())}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Historique exporté avec le bilan global des compteurs.');
 }
 
 async function queueAdminBroadcastTest(){

@@ -55,7 +55,23 @@
   </div>
   <div class="settings-block"><h3>Apparence</h3><div class="segmented"><button data-theme="auto">Auto</button><button data-theme="light">Clair</button><button data-theme="dark">Sombre</button></div></div>
   <div class="settings-block"><h3>Notifications</h3><label class="toggle-row"><span><strong>Rappel de saisie</strong><span class="small muted">À 20h si le lendemain est travaillé et non renseigné.</span></span><input id="notificationsToggle" type="checkbox"></label><div id="notificationStatus" class="small muted"></div><div id="notificationTestActions" class="notification-test-actions" style="display:none"><button id="localNotificationTestBtn" class="btn secondary smallbtn" type="button">🔔 Tester maintenant</button><button id="copyFcmTokenBtn" class="btn ghost smallbtn" type="button">Copier le jeton FCM</button></div></div>
-  <div class="settings-block help-menu-block"></div>
+  <div class="settings-block help-menu-block">
+    <details>
+      <summary class="menu-link" style="list-style:none"><span>❔ Aide</span><span>›</span></summary>
+      <div class="about-details" style="gap:10px">
+        <div><strong>Comment fonctionne Covoiturage ?</strong><div class="small muted">L’application organise les trajets du groupe à partir des disponibilités de chacun et garde les compteurs de conducteurs équilibrés.</div></div>
+        <div class="small"><strong>1. Renseigner le prochain jour</strong><br>Dans <strong>Prochain</strong>, chacun indique son statut : <strong>Présent</strong> pour covoiturer normalement, <strong>Absent</strong> s’il ne participe pas, <strong>Seul</strong> s’il fait le trajet de son côté, ou <strong>Impératif</strong> s’il doit repartir à une heure précise.</div>
+        <div class="small"><strong>2. Gérer un impératif</strong><br>Avec <strong>Impératif</strong>, on choisit l’heure de départ. Les autres membres concernés peuvent indiquer s’ils sont compatibles avec cette contrainte, afin d’éviter de proposer un groupe impossible.</div>
+        <div class="small"><strong>3. Proposition automatique</strong><br>L’application utilise les personnes disponibles, les impératifs et l’historique pour proposer les groupes. Elle suggère aussi le conducteur qui a le moins conduit dans cette <strong>composition précise</strong> de groupe.</div>
+        <div class="small"><strong>4. Conducteur réel et validation</strong><br>Avant de valider, le conducteur réellement utilisé peut être choisi. C’est ce conducteur qui sera ajouté à l’historique et aux compteurs. En production, un trajet du jour est validable à partir de 7h ; dans cette version TEST, la validation est volontairement libre pour les démonstrations.</div>
+        <div class="small"><strong>5. Planning</strong><br>L’onglet <strong>Planning</strong> permet de renseigner plusieurs jours d’un coup, puis de modifier une journée individuellement. Les week-ends, jours fériés du Jura et exceptions d’entreprise sont gérés automatiquement.</div>
+        <div class="small"><strong>6. Groupes</strong><br>L’onglet <strong>Groupes</strong> permet de préparer ou corriger manuellement les groupes d’une date, notamment pour enregistrer fidèlement ce qui s’est réellement passé.</div>
+        <div class="small"><strong>7. Historique et compteurs</strong><br><strong>Historique</strong> affiche les trajets enregistrés et le bilan personnel. Les compteurs de conducteurs sont propres à chaque composition : un binôme possède donc son propre équilibre, différent d’un trinôme ou d’un groupe plus grand.</div>
+        <div class="small"><strong>8. Rappels</strong><br>Si les notifications sont activées, un rappel peut être envoyé à 20h lorsque le prochain jour travaillé n’a pas encore été renseigné.</div>
+        <div class="notice oknotice small" style="margin:2px 0 0"><strong>Le principe :</strong> chacun renseigne simplement sa situation ; l’application aide ensuite à constituer un groupe compatible et à faire tourner les conducteurs le plus équitablement possible.</div>
+      </div>
+    </details>
+  </div>
   <div id="adminMenuBlock" class="settings-block" style="display:none"><button id="openAdminBtn" class="btn secondary full">Administration</button></div>
   <div class="settings-block about-block">
     <button id="aboutToggle" class="menu-link" type="button"><span>À propos</span><span>›</span></button>
@@ -111,6 +127,21 @@
   <div class="card">
     <div class="row between"><div><h1>Mon bilan</h1><div class="muted" id="summaryUser"></div></div><select id="summaryPeriod" class="input"><option value="month">Ce mois</option><option value="year">Cette année</option><option value="all">Depuis le début</option></select></div>
     <div class="kpis four"><div class="kpi"><span class="small muted">Conducteur</span><strong id="kDriver">0</strong><span class="small">fois</span></div><div class="kpi"><span class="small muted">Passager</span><strong id="kPassenger">0</strong><span class="small">fois</span></div><div class="kpi"><span class="small muted">Jours covoiturés</span><strong id="kCarpooled">0</strong><span class="small">jours</span></div><div class="kpi"><span class="small muted">Jours renseignés</span><strong id="kTracked">0</strong><span class="small">jours</span></div></div>
+  </div>
+  <div class="card group-balance-shell">
+    <div class="row between group-balance-heading">
+      <div>
+        <h2>Bilan des groupes</h2>
+        <div class="small muted">Tape les initiales des personnes à comparer. Le résultat se filtre instantanément.</div>
+      </div>
+      <span id="groupBalanceCount" class="pill">—</span>
+    </div>
+    <div class="group-balance-search">
+      <label for="groupBalanceFilter">Initiales du groupe</label>
+      <input id="groupBalanceFilter" class="input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Ex. I · IL · IAL">
+      <div class="small muted">Ordre indifférent : IAL trouve aussi AIL, AILS, AEIL…</div>
+    </div>
+    <div id="groupBalanceList" class="group-balance-list"><div class="empty">Tape une ou plusieurs initiales : A, E, I, L ou S.</div></div>
   </div>
   <div class="grid two history-grid">
     <div class="card"><div class="row between"><div><h2>Historique des trajets</h2><div class="big" id="historyCount">0</div><div class="muted">trajets enregistrés</div></div><button id="exportHistory" class="btn secondary">⬇ Exporter CSV</button></div><div id="qualityBox" class="notice oknotice"><strong>Points à vérifier</strong><div id="qualityList" class="small"></div></div></div>

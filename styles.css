@@ -327,3 +327,39 @@ html[data-theme="dark"] .delle-proposal-shell .validated-summary{
   border-color:#705c26!important;
   color:#ffe8a3!important;
 }
+
+
+/* 4.8.0-beta.7 — bilan lisible des compteurs par composition */
+.group-balance-shell{margin-top:12px}
+.group-balance-heading{align-items:flex-start;margin-bottom:14px}
+.group-balance-heading h2{margin-bottom:3px}
+.group-balance-list{display:grid;gap:16px}
+.group-balance-section{display:grid;gap:8px}
+.group-balance-section-title{font-size:12px;font-weight:850;color:var(--muted);text-transform:uppercase;letter-spacing:.45px}
+.group-balance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(235px,1fr));gap:9px}
+.group-balance-card{border:1px solid var(--line);border-radius:12px;background:var(--soft);padding:11px 12px;min-width:0}
+.group-balance-card-head{display:flex;align-items:baseline;gap:9px;padding-bottom:8px;margin-bottom:7px;border-bottom:1px solid var(--line);min-width:0}
+.group-balance-code{font-size:17px;color:var(--brand);letter-spacing:.3px;flex:0 0 auto}
+.group-balance-card-head .muted{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.group-balance-values{display:grid;gap:4px}
+.group-balance-value{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 0}
+.group-balance-value span{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.group-balance-value strong{font-size:20px;line-height:1;color:var(--ink);font-variant-numeric:tabular-nums}
+html[data-theme="dark"] .group-balance-card{background:#151b22}
+@media(max-width:520px){
+  .group-balance-shell{padding:14px}
+  .group-balance-heading{gap:8px}
+  .group-balance-grid{grid-template-columns:1fr}
+  .group-balance-card{padding:10px 11px}
+}
+
+
+/* 4.8.0-beta.8 — recherche instantanée du bilan des groupes */
+.group-balance-search{display:grid;gap:5px;margin:0 0 14px;max-width:460px}
+.group-balance-search label{font-size:12px;color:var(--muted);font-weight:750}
+.group-balance-search .input{width:100%;font-size:16px;font-weight:800;letter-spacing:1.2px;text-transform:uppercase}
+.group-balance-search .small{line-height:1.35}
+@media(max-width:520px){
+  .group-balance-search{max-width:none}
+  .group-balance-search .input{font-size:16px}
+}
