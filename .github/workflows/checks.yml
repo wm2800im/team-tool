@@ -1,0 +1,27 @@
+name: Vérifications application PROD
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Vérifier la syntaxe
+        run: |
+          node --check app.js
+          node --check public-config.js
+          node --check service-worker.js
+      - name: Vérifier la configuration Firebase PROD
+        run: |
+          grep -q 'environment: "production"' public-config.js
+          grep -q 'projectId: "team-tool-data"' public-config.js
+          ! grep -q 'projectId: "team-tool-test-data"' public-config.js
+      - name: Vérifier les scénarios de covoiturage
+        run: node --test tests/*.test.mjs
