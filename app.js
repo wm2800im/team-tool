@@ -5,7 +5,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js';
 import {
   getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, doc, getDoc, getDocs, setDoc, deleteDoc, updateDoc, writeBatch, runTransaction,
+  collection, doc, getDoc, getDocFromServer, getDocs, setDoc, deleteDoc, updateDoc, writeBatch, runTransaction,
   onSnapshot, serverTimestamp, query, where, documentId
 } from 'https://www.gstatic.com/firebasejs/12.18.0/firebase-firestore.js';
 import {
@@ -683,6 +683,43 @@ async function applyRange(){
 }
 
 function currentPlan(date){ return plans.get(date)?.groups || []; }
+function recordUpdateMillis(record){
+  const stamp=record?.updatedAt;
+  if(typeof stamp?.toMillis==='function')return stamp.toMillis();
+  if(typeof stamp?.seconds==='number')return stamp.seconds*1000;
+  return 0;
+}
+function savedPlanNeedsAvailabilityRefresh(date,saved){
+  if(isPastDate(date)||!saved.length)return false;
+  const active=PEOPLE.filter(p=>isAvailable(getAvail(date,p)));
+  const activeSet=new Set(active);
+  const listed=saved.flatMap(g=>g.members||[]);
+  if(new Set(listed).size!==listed.length)return true;
+  if(saved.some(g=>(g.members||[]).length<2||!g.members.includes(g.driver)))return true;
+  if(listed.some(p=>!activeSet.has(p)))return true;
+  // Une personne devenue présente après la dernière modification du plan doit être intégrée.
+  // Une exclusion volontaire antérieure reste possible pendant la constitution manuelle des groupes.
+  const planUpdated=recordUpdateMillis(plans.get(date));
+  return !!planUpdated&&active.some(p=>!listed.includes(p)&&recordUpdateMillis(getAvail(date,p))>planUpdated);
+}
+function updatedProposalFromSaved(date,saved){
+  const proposal=autoSuggestedGroups(date);
+  // Conserver le conducteur choisi si son ancien groupe a encore au moins deux membres communs.
+  for(const group of proposal.groups){
+    const original=saved.map(g=>({
+      group:g,
+      overlap:(g.members||[]).filter(p=>group.members.includes(p)).length
+    })).filter(x=>group.members.includes(x.group.driver)).sort((a,b)=>b.overlap-a.overlap)[0];
+    if(original?.overlap>=2)group.driver=original.group.driver;
+  }
+  return {...proposal,saved:false,groupRejected:[],refreshed:true};
+}
+function displayedPlan(date){
+  const saved=currentPlan(date);
+  if(!saved.length||!savedPlanNeedsAvailabilityRefresh(date,saved))return saved;
+  return updatedProposalFromSaved(date,saved).groups;
+}
+
 function explicitIncompatibilities(date,members){
   const out=[];
   members.forEach(owner=>{
@@ -717,14 +754,14 @@ function renderGroups(){
   }
   if($('addGroup'))$('addGroup').disabled=false;
   const ds=$('groupDate').value||nextCarpoolISO();
-  const past=isPastDate(ds); const groups=currentPlan(ds);
+  const past=isPastDate(ds); const groups=displayedPlan(ds);
   const editing=(editingGroupDate===ds)?groups.find(g=>g.id===editingGroupId):null;
   if(editingGroupDate===ds&&editingGroupId&&!editing){editingGroupId=null;editingGroupDate=null;}
   const assigned=new Set(groups.filter(g=>!editing||g.id!==editing.id).flatMap(g=>g.members));
   const box=$('availablePeople');box.innerHTML='';
   PEOPLE.forEach(p=>{
     const v=getAvail(ds,p),m=statusMeta(v),selectedForEdit=!!editing?.members?.includes(p);
-    const can=!assigned.has(p) && (selectedForEdit || past || isAvailable(v));
+    const can=!assigned.has(p) && (past || isAvailable(v));
     const row=document.createElement('label');row.className='person-row';
     const info=assigned.has(p)?'Déjà dans un autre groupe':selectedForEdit?'Dans le groupe à modifier':(past?`${m.label} · saisie a posteriori`:m.label);
     const checked=assigned.has(p)||selectedForEdit||(!editing&&can),disabled=assigned.has(p)||!can;
@@ -774,7 +811,7 @@ async function addSelectedGroup(){
   const ds=$('groupDate').value;const members=qsa('.group-check:checked:not(:disabled)').map(x=>x.value);
   if(members.length<2||members.length>5){alert('Sélectionne entre 2 et 5 personnes.');return;}
   const bad=isPastDate(ds)?[]:explicitIncompatibilities(ds,members);if(bad.length){alert('Ce groupe contient une incompatibilité horaire explicite.');return;}
-  const sug=driverSuggestion(ds,members),current=currentPlan(ds),editing=(editingGroupDate===ds)?current.find(g=>g.id===editingGroupId):null;
+  const sug=driverSuggestion(ds,members),current=displayedPlan(ds),editing=(editingGroupDate===ds)?current.find(g=>g.id===editingGroupId):null;
   if(editing){
     const driver=members.includes(editing.driver)?editing.driver:(sug.candidates[0]||canonical(members)[0]);
     const groups=current.map(g=>g.id===editing.id?{...g,members:canonical(members),driver}:g);
@@ -794,7 +831,7 @@ async function savePlan(date,groups){
   catch(e){if(previous)plans.set(date,previous);else plans.delete(date);refreshForData('plans');throw e;}
 }
 function renderDraftGroups(ds){
-  const box=$('draftGroups'),gs=currentPlan(ds);box.innerHTML='';
+  const box=$('draftGroups'),gs=displayedPlan(ds);box.innerHTML='';
   const validationMessage=$('validationMessage');
   if(!gs.length){
     box.innerHTML='<div class="empty">Aucun groupe prévu.</div>';
@@ -820,9 +857,9 @@ function renderDraftGroups(ds){
       ${multi?`<div class="row" style="margin-top:8px"><button class="btn smallbtn validate-one-group" data-id="${g.id}" ${(done||!validationGate.allowed)?'disabled':''}>${action}</button></div>`:''}`;
     box.appendChild(div);
   });
-  box.querySelectorAll('.del-group').forEach(b=>b.addEventListener('click',async()=>{if(editingGroupDate===ds&&editingGroupId===b.dataset.id){editingGroupId=null;editingGroupDate=null;}await savePlan(ds,currentPlan(ds).filter(g=>g.id!==b.dataset.id));toast('Groupe supprimé.');}));
-  box.querySelectorAll('.driver-select').forEach(s=>s.addEventListener('change',async()=>{const gs=currentPlan(ds).map(g=>g.id===s.dataset.id?{...g,driver:s.value}:g);await savePlan(ds,gs);toast('Conducteur modifié.');}));
-  box.querySelectorAll('.validate-one-group').forEach(b=>b.addEventListener('click',async()=>{const planned=currentPlan(ds),g=planned.find(x=>x.id===b.dataset.id);if(!g)return;b.disabled=true;b.textContent='Enregistrement…';try{await validateSingleGroupForDate(ds,g,planned);}catch(e){alert(friendlyError(e));renderGroups();}}));
+  box.querySelectorAll('.del-group').forEach(b=>b.addEventListener('click',async()=>{if(editingGroupDate===ds&&editingGroupId===b.dataset.id){editingGroupId=null;editingGroupDate=null;}await savePlan(ds,displayedPlan(ds).filter(g=>g.id!==b.dataset.id));toast('Groupe supprimé.');}));
+  box.querySelectorAll('.driver-select').forEach(s=>s.addEventListener('change',async()=>{const gs=displayedPlan(ds).map(g=>g.id===s.dataset.id?{...g,driver:s.value}:g);await savePlan(ds,gs);toast('Conducteur modifié.');}));
+  box.querySelectorAll('.validate-one-group').forEach(b=>b.addEventListener('click',async()=>{const planned=displayedPlan(ds),g=planned.find(x=>x.id===b.dataset.id);if(!g)return;b.disabled=true;b.textContent='Enregistrement…';try{await validateSingleGroupForDate(ds,g,planned);}catch(e){alert(friendlyError(e));renderGroups();}}));
 }
 function groupsHaveOverlap(groups){
   const seen=new Set();for(const g of groups){for(const p of (g.members||g.participants||[])){if(seen.has(p))return p;seen.add(p);}}return null;
@@ -830,6 +867,32 @@ function groupsHaveOverlap(groups){
 function groupMembersKey(g){return canonical(g?.members||g?.participants||[]).join('|');}
 function validatedGroupForPlan(ds,g){const key=groupMembersKey(g);return tripGroupsForDate(ds).find(v=>groupMembersKey(v)===key)||null;}
 function isPlannedGroupValidated(ds,g){const v=validatedGroupForPlan(ds,g);return !!v&&(v.driver||v.driverId)===(g.driver||g.driverId);}
+async function assertLiveGroupStatus(date,members){
+  if(isPastDate(date))return; // Les corrections historiques restent autorisées.
+  // Lecture serveur juste avant écriture : le groupe ne peut contenir « Seul » ou « Absent ».
+  const current=await Promise.all(members.map(async p=>{
+    const snap=await getDocFromServer(doc(db,'availability',availKey(date,p)));
+    return {p,v:snap.exists()?snap.data():null};
+  }));
+  const invalid=current.filter(x=>!isAvailable(x.v));
+  if(invalid.length)throw new Error(`Disponibilité modifiée : ${invalid.map(x=>label(x.p)).join(', ')} n'est plus disponible pour le covoiturage. Actualise la proposition.`);
+  // Vérification des réponses aux impératifs, y compris si l'heure a été modifiée.
+  const constraints=[];
+  for(const {p:owner,v} of current){
+    if(v.status!=='time')continue;
+    for(const {p:responder} of current){
+      if(responder!==owner)constraints.push({owner,responder,time:v.time});
+    }
+  }
+  const checked=await Promise.all(constraints.map(async c=>{
+    const snap=await getDocFromServer(doc(db,'compatibilities',compatKey(date,c.owner,c.responder)));
+    return {constraint:c,response:snap.exists()?snap.data():null};
+  }));
+  const rejected=checked.filter(x=>x.response?.ownerTime===x.constraint.time&&x.response?.response==='no');
+  if(rejected.length)throw new Error('Un membre du groupe a refusé un impératif horaire.');
+  const unanswered=checked.filter(x=>!x.response||x.response.ownerTime!==x.constraint.time||x.response.response!=='yes');
+  if(unanswered.length)throw new Error('Une ou plusieurs réponses aux impératifs sont encore attendues pour ce groupe.');
+}
 async function validateSingleGroupForDate(ds,g,planGroups=[]){
   const validationGate=tripValidationAvailability(ds);
   if(!validationGate.allowed)throw new Error(validationGate.message);
@@ -839,7 +902,8 @@ async function validateSingleGroupForDate(ds,g,planGroups=[]){
     if(explicitIncompatibilities(ds,members).length)throw new Error('Ce groupe contient une incompatibilité horaire.');
     if(unknownCompatibilities(ds,members).length)throw new Error('Une ou plusieurs réponses aux impératifs sont encore attendues pour ce groupe.');
   }
-  const normalizedPlan=(planGroups.length?planGroups:currentPlan(ds)).map(x=>({id:x.id||crypto.randomUUID(),members:canonical(x.members||x.participants||[]),driver:x.driver||x.driverId}));
+  await assertLiveGroupStatus(ds,members);
+  const normalizedPlan=(planGroups.length?planGroups:displayedPlan(ds)).map(x=>({id:x.id||crypto.randomUUID(),members:canonical(x.members||x.participants||[]),driver:x.driver||x.driverId}));
   const normalizedGroup={id:g.id||crypto.randomUUID(),members,driver,source:IS_TEST?'test':'app'};
   const tripRef=doc(db,'tripDays',ds),planRef=doc(db,'plans',ds);let merged=[];
   await runTransaction(db,async tx=>{
@@ -859,14 +923,14 @@ async function validateSingleGroupForDate(ds,g,planGroups=[]){
   scheduleQuotaBaselineRebuild(ds);toast(`✓ Groupe ${members.map(label).join(' · ')} enregistré`);
 }
 async function validateTrips(){
-  const ds=$('groupDate').value,groups=currentPlan(ds);if(!groups.length)return;
+  const ds=$('groupDate').value,groups=displayedPlan(ds);if(!groups.length)return;
   if(groups.length>1){$('validationMessage').textContent='Valide chaque groupe séparément avec son bouton.';return;}
   try{await validateGroupsForDate(ds,groups);$('validationMessage').textContent=`${groups.length} trajet(s) validé(s) pour ${fmtDate(ds)}.`;}catch(e){alert(friendlyError(e));}
 }
 function renderValidatedInfo(ds){
   const groups=tripGroupsForDate(ds),box=$('validatedTodayInfo');
   if(!groups.length){box.innerHTML='';return;}
-  const note=currentPlan(ds).length>1?'Chaque groupe peut être validé ou mis à jour indépendamment.':'Valider de nouveau met à jour le trajet de cette date sans créer de doublon.';
+  const note=displayedPlan(ds).length>1?'Chaque groupe peut être validé ou mis à jour indépendamment.':'Valider de nouveau met à jour le trajet de cette date sans créer de doublon.';
   box.innerHTML=`<div class="notice oknotice"><strong>${groups.length} trajet(s) déjà validé(s)</strong><div class="small">${note}</div></div>`;
 }
 function loadValidatedIntoPlan(date){
@@ -1300,6 +1364,7 @@ function autoSuggestedGroups(date){
 function proposalForDate(date){
   const saved=currentPlan(date);
   if(saved.length){
+    if(savedPlanNeedsAvailabilityRefresh(date,saved))return updatedProposalFromSaved(date,saved);
     const members=canonical(saved.flatMap(g=>g.members));
     const groupState=globalCompatibilityState(date,members);
     // L'affichage des impératifs concerne tous les présents, même hors du groupe manuel.
@@ -1313,7 +1378,7 @@ function proposalForDate(date){
 function normalizedGroupSignature(groups){return groups.map(g=>`${canonical(g.members||g.participants||[]).join('|')}>${g.driver||g.driverId||''}`).sort().join('||');}
 function validatedSummaryHTML(ds){
   const groups=tripGroupsForDate(ds); if(!groups.length)return '';
-  const planned=currentPlan(ds),partial=planned.length>1&&groups.length<planned.length,title=partial?`✓ ${groups.length}/${planned.length} groupe(s) validé(s)`:'✓ Covoiturage validé';
+  const planned=displayedPlan(ds),partial=planned.length>1&&groups.length<planned.length,title=partial?`✓ ${groups.length}/${planned.length} groupe(s) validé(s)`:'✓ Covoiturage validé';
   const lines=groups.map((g,i)=>{const members=canonical(g.members||g.participants||[]),driver=g.driver||g.driverId,passengers=members.filter(p=>p!==driver);return `<div class="validated-line"><span>${groups.length>1?`<strong>Groupe ${i+1} · </strong>`:''}🚗 <strong>${label(driver)}</strong>${passengers.length?` · Passagers : ${passengers.map(label).join(', ')}`:''}</span></div>`;}).join('');
   return `<div class="validated-summary"><div class="validated-title">${title}</div>${lines}</div>`;
 }
@@ -1528,6 +1593,7 @@ async function validateGroupsForDate(ds,groups){
       if(unknownCompatibilities(ds,g.members).length){alert('Une ou plusieurs réponses aux impératifs sont encore attendues pour ce groupe.');return;}
     }
   }
+  for(const g of groups)await assertLiveGroupStatus(ds,g.members);
   const existing=tripDays.get(ds),same=existing?.groups?.length&&normalizedGroupSignature(existing.groups)===normalizedGroupSignature(groups);if(existing?.groups?.length&&!same&&!confirm(`Des trajets sont déjà validés pour ${fmtDate(ds)}. Les remplacer ?`))return;
   const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver,source:IS_TEST?'test':'app'})); const previousTrip=tripDays.get(ds),previousPlan=plans.get(ds);
   tripDays.set(ds,{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedBy:profileId}); plans.set(ds,{date:ds,groups:normalized,updatedBy:profileId}); if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups')){renderGroups();renderValidatedInfo(ds);} if(activePage('history')){renderSummary();renderHistory();}
