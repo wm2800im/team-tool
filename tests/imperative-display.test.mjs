@@ -28,11 +28,15 @@ function fixture(aurelien='no',ludo=null) {
     }
     return {unknown,rejected,pending:unknown.length>0};
   };
+  // Ce test cible l'affichage des réponses ; le recalcul des plans périmés
+  // est couvert séparément dans manual-plan-status.test.mjs.
   const factory=new Function('currentPlan','globalCompatibilityState','canonical','PEOPLE','isAvailable','getAvail','autoSuggestedGroups',
+    'savedPlanNeedsAvailabilityRefresh','updatedProposalFromSaved',
     extract('proposalForDate','normalizedGroupSignature')+';return proposalForDate;');
   const proposal=factory(()=>[group],inspect,arr=>[...new Set(arr)].sort(),people,
     v=>['present','time'].includes(v?.status),(date,p)=>availability[p],
-    ()=>({groups:[],singles:[],pending:false,unknown:[],rejected:[]}))('2026-11-06');
+    ()=>({groups:[],singles:[],pending:false,unknown:[],rejected:[]}),
+    ()=>false,()=>{throw new Error('Groupe manuel non périmé dans ce test');})('2026-11-06');
   return proposal;
 }
 const formatter=new Function('label','timeLabel',
