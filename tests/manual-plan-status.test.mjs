@@ -49,6 +49,6 @@ test('Saisie historique : les groupes réels restent modifiables malgré les sta
 });
 test('Validation : contrôle serveur des statuts et impératifs avant écriture',()=>{
  assert.match(source,/getDocFromServer\(doc\(db,'availability',availKey\(date,p\)\)\)/);
- assert.match(source,/await assertLiveGroupStatus\(ds,members\)/);
- assert.match(source,/for\(const g of groups\)await assertLiveGroupStatus\(ds,g.members\)/);
+ assert.match(source,/await assertLiveGroupStatus\(ds,members,driver\)/);
+ assert.match(source,/for\(const g of groups\)await assertLiveGroupStatus\(ds,g.members,g.driver\)/);
 });

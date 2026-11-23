@@ -258,13 +258,14 @@ function driverChoiceOpen(ds){
   return tripValidationRule(ds,appTodayISO(),now.hour,false);
 }
 function canChangeDriver(ds,group,newDriver){
+  if(newDriver!==(group?.driver||group?.driverId)&&!hasCar(ds,newDriver))return false;
   return driverChangeRule(group,newDriver,profileId,driverChoiceOpen(ds));
 }
 function driverLockMessage(ds){
   return `Jusqu’à ${fmtDate(ds)} 7h, chacun peut seulement se proposer lui-même comme conducteur.`;
 }
 function driverOptionsHtml(ds,g){
-  return canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''} ${canChangeDriver(ds,g,p)?'':'disabled'}>${label(p)}</option>`).join('');
+  return canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''} ${canChangeDriver(ds,g,p)?'':'disabled'}>${label(p)}${hasCar(ds,p)?'':' · sans voiture'}</option>`).join('');
 }
 function driverSelectLocked(ds,g){
   return !canonical(g.members).some(p=>p!==g.driver&&canChangeDriver(ds,g,p));
@@ -291,10 +292,14 @@ function showAccess(message=''){
 function showApp(){ $('accessScreen').style.display='none'; $('appShell').style.display='block'; }
 function statusMeta(v){
   if(!v)return STATUS.missing;
-  if(v.status==='time')return {label:`Impératif ${timeLabel(v.time)}`.trim(),cls:'time'};
-  return STATUS[v.status]||STATUS.missing;
+  const car=isAvailable(v)&&v.noCar===true?' · sans voiture':'';
+  if(v.status==='time')return {label:`Impératif ${timeLabel(v.time)}`.trim()+car,cls:'time'};
+  const base=STATUS[v.status]||STATUS.missing;
+  return car?{...base,label:base.label+car}:base;
 }
 function isAvailable(v){ return !!v && (v.status==='present'||v.status==='time'); }
+// « Pas de voiture » ne vaut que pour le jour saisi ; les dates passées restent libres.
+function hasCar(date,pid){ return isPastDate(date)||getAvail(date,pid)?.noCar!==true; }
 function getAvail(date,pid){ return availability.get(availKey(date,pid)) || null; }
 function getCompat(date,owner,responder){ return compatibilities.get(compatKey(date,owner,responder)) || null; }
 
@@ -504,6 +509,7 @@ function initStaticUI(){
   qsa('#nav button[data-page]').forEach(b=>b.addEventListener('click',()=>openPage(b.dataset.page)));
   qsa('.status-btn').forEach(b=>b.addEventListener('click',()=>handleTomorrowStatus(b.dataset.status)));
   $('saveTime').addEventListener('click',()=>setAvailability(nextCarpoolISO(),'time',$('timeLimit').value));
+  $('noCarToggle')?.addEventListener('change',()=>{const ds=nextCarpoolISO(),v=getAvail(ds,profileId);if(!isAvailable(v))return;setAvailability(ds,v.status,v.time,{noCar:$('noCarToggle').checked});});
   $('rangeStatus').addEventListener('change',()=>{$('rangeTimeField').style.display=$('rangeStatus').value==='time'?'flex':'none';});
   $('applyRange').addEventListener('click',applyRange); $('groupDate').addEventListener('change',renderGroups); $('addGroup').addEventListener('click',addSelectedGroup); $('validateTrips').addEventListener('click',validateTrips);
   $('summaryPeriod').addEventListener('change',()=>{renderSummary();renderHistory();}); $('historyFilter').addEventListener('input',renderHistory); $('groupBalanceFilter')?.addEventListener('input',()=>renderGroupCounterSummary(flattenTrips())); $('exportHistory').addEventListener('click',exportHistoryCSV); $('installBtn').addEventListener('click',installPwa);
@@ -549,9 +555,10 @@ async function handleTomorrowStatus(st){
   }
   $('timeBox').style.display='none';await setAvailability(ds,st,null);
 }
-async function setAvailability(date,status,time=null){
+async function setAvailability(date,status,time=null,{noCar}={}){
   const key=availKey(date,profileId), previous=availability.get(key);
-  const optimistic={date,profileId,status,time:status==='time'?time:null,updatedByUid:authUser.uid};
+  const carless=(status==='present'||status==='time')&&(noCar??previous?.noCar===true);
+  const optimistic={date,profileId,status,time:status==='time'?time:null,...(carless?{noCar:true}:{}),updatedByUid:authUser.uid};
   availability.set(key,optimistic);
   if(activePage('tomorrow'))renderTomorrow(); if(activePage('planning'))renderPlanning(); if(activePage('groups'))renderGroups(); if(activePage('history'))renderSummary();
   toast(`${fmtDate(date,{weekday:'short',day:'numeric',month:'short'})} : ${statusMeta(optimistic).label} · enregistrement…`);
@@ -586,7 +593,7 @@ function collectiveStatusMeta(date,pid,v){
   const base=statusMeta(v);
   if(v?.status!=='present')return base;
   const times=acceptedImperativeTimes(date,pid);
-  return times.length?{label:`Présent ${times.join(' / ')}`,cls:'present'}:base;
+  return times.length?{label:`Présent ${times.join(' / ')}${v.noCar===true?' · sans voiture':''}`,cls:'present'}:base;
 }
 
 function renderTomorrow(){
@@ -594,6 +601,7 @@ function renderTomorrow(){
   const mine=getAvail(ds,profileId),mineMeta=statusMeta(mine);
   qsa('.status-btn').forEach(b=>b.classList.toggle('selected',mine?.status===b.dataset.status));
   $('timeBox').style.display=mine?.status==='time'?'flex':'none'; if(mine?.status==='time')$('timeLimit').value=mine.time||'16:15'; syncUnknownTimeHelp();
+  const noCarBox=$('noCarBox'); if(noCarBox){noCarBox.style.display=isAvailable(mine)?'flex':'none'; $('noCarToggle').checked=mine?.noCar===true;}
   const mineSummary=$('myTomorrowSummary'); if(mineSummary)mineSummary.textContent='';
   const box=$('collectiveTomorrow');box.innerHTML='';let answered=0;
   PEOPLE.forEach(p=>{const v=getAvail(ds,p);if(v)answered++;const m=collectiveStatusMeta(ds,p,v);const row=document.createElement('div');row.className='person-row compact-person';row.innerHTML=`<div class="avatar">${INITIAL[p]}</div><div class="grow"><strong>${label(p)}</strong></div><span class="pill ${m.cls}">${m.label}</span>`;box.appendChild(row);});
@@ -735,14 +743,14 @@ function updatedProposalFromSaved(date,saved){
     const original=saved.map(g=>({
       group:g,
       overlap:(g.members||[]).filter(p=>group.members.includes(p)).length
-    })).filter(x=>group.members.includes(x.group.driver)).sort((a,b)=>b.overlap-a.overlap)[0];
+    })).filter(x=>group.members.includes(x.group.driver)&&getAvail(date,x.group.driver)?.noCar!==true).sort((a,b)=>b.overlap-a.overlap)[0];
     if(original?.overlap>=2)group.driver=original.group.driver;
   }
   return {...proposal,saved:false,groupRejected:[],refreshed:true};
 }
 function displayedPlan(date){
   const saved=currentPlan(date);
-  if(!saved.length||!savedPlanNeedsAvailabilityRefresh(date,saved))return saved;
+  if(!saved.length||!savedPlanNeedsAvailabilityRefresh(date,saved))return withCarDrivers(date,saved);
   return updatedProposalFromSaved(date,saved).groups;
 }
 
@@ -821,10 +829,12 @@ function lastDrivingDateBefore(ds,pid){
   availability.forEach(scan);legacyStatus.forEach(scan);
   return last;
 }
-function driverSuggestion(ds,members){
+function driverSuggestion(ds,members,eligible=members){
   const target=canonical(members).join('|'); const counts=Object.fromEntries(members.map(p=>[p,0]));
   flattenTrips().filter(t=>t.date<ds&&canonical(t.participants).join('|')===target).forEach(t=>{if(t.driver in counts)counts[t.driver]++;});
-  const min=Math.min(...members.map(p=>counts[p]));let candidates=canonical(members.filter(p=>counts[p]===min));
+  // Les compteurs restent ceux du groupe complet ; seuls les membres avec voiture peuvent être suggérés.
+  const pool=members.filter(p=>eligible.includes(p)),drivers=pool.length?pool:members;
+  const min=Math.min(...drivers.map(p=>counts[p]));let candidates=canonical(drivers.filter(p=>counts[p]===min));
   const lastDriving=Object.fromEntries(candidates.map(p=>[p,lastDrivingDateBefore(ds,p)]));
   if(candidates.length>1){
     const oldest=[...candidates].sort((a,b)=>(lastDriving[a]||'').localeCompare(lastDriving[b]||''))[0];
@@ -837,9 +847,10 @@ async function addSelectedGroup(){
   const ds=$('groupDate').value;const members=qsa('.group-check:checked:not(:disabled)').map(x=>x.value);
   if(members.length<2||members.length>5){alert('Sélectionne entre 2 et 5 personnes.');return;}
   const bad=isPastDate(ds)?[]:explicitIncompatibilities(ds,members);if(bad.length){alert('Ce groupe contient une incompatibilité horaire explicite.');return;}
-  const sug=driverSuggestion(ds,members),current=displayedPlan(ds),editing=(editingGroupDate===ds)?current.find(g=>g.id===editingGroupId):null;
+  if(!isPastDate(ds)&&!members.some(p=>hasCar(ds,p))){alert('Personne dans ce groupe n’a de voiture ce jour-là.');return;}
+  const sug=driverSuggestion(ds,members,members.filter(p=>hasCar(ds,p))),current=displayedPlan(ds),editing=(editingGroupDate===ds)?current.find(g=>g.id===editingGroupId):null;
   if(editing){
-    const driver=members.includes(editing.driver)?editing.driver:(sug.candidates[0]||canonical(members)[0]);
+    const driver=members.includes(editing.driver)&&hasCar(ds,editing.driver)?editing.driver:(sug.candidates[0]||canonical(members)[0]);
     const groups=current.map(g=>g.id===editing.id?{...g,members:canonical(members),driver}:g);
     const overlap=groupsHaveOverlap(groups);if(overlap){alert(`${label(overlap)} apparaît dans plusieurs groupes.`);return;}
     editingGroupId=null;editingGroupDate=null;
@@ -874,7 +885,7 @@ function renderDraftGroups(ds){
     else if(validationMessage.dataset.validationGate==='1'){validationMessage.textContent='';delete validationMessage.dataset.validationGate;}
   }
   gs.forEach((g,idx)=>{
-    const sug=driverSuggestion(ds,g.members),equal=sug.candidates.length>1,vg=validatedGroupForPlan(ds,g),done=isPlannedGroupValidated(ds,g);
+    const sug=driverSuggestion(ds,g.members,g.members.filter(p=>hasCar(ds,p))),equal=sug.candidates.length>1,vg=validatedGroupForPlan(ds,g),done=isPlannedGroupValidated(ds,g);
     const action=done?'✓ Groupe validé':vg?'↻ Mettre à jour ce groupe':'✓ Valider ce groupe';const div=document.createElement('div');div.className='group-card';div.dataset.groupId=g.id;if(editingGroupDate===ds&&editingGroupId===g.id)div.classList.add('group-card-focus');
     div.innerHTML=`<div class="row" style="justify-content:space-between"><strong>Groupe ${idx+1} · ${sug.key}</strong><button class="btn danger smallbtn del-group" data-id="${g.id}">Supprimer</button></div>
       <div class="group-members">${canonical(g.members).map(p=>`<span class="member-chip">${label(p)}</span>`).join('')}</div>
@@ -893,7 +904,7 @@ function groupsHaveOverlap(groups){
 function groupMembersKey(g){return canonical(g?.members||g?.participants||[]).join('|');}
 function validatedGroupForPlan(ds,g){const key=groupMembersKey(g);return tripGroupsForDate(ds).find(v=>groupMembersKey(v)===key)||null;}
 function isPlannedGroupValidated(ds,g){const v=validatedGroupForPlan(ds,g);return !!v&&(v.driver||v.driverId)===(g.driver||g.driverId);}
-async function assertLiveGroupStatus(date,members){
+async function assertLiveGroupStatus(date,members,driver=null){
   if(isPastDate(date))return; // Les corrections historiques restent autorisées.
   // Lecture serveur juste avant écriture : le groupe ne peut contenir « Seul » ou « Absent ».
   const current=await Promise.all(members.map(async p=>{
@@ -902,6 +913,7 @@ async function assertLiveGroupStatus(date,members){
   }));
   const invalid=current.filter(x=>!isAvailable(x.v));
   if(invalid.length)throw new Error(`Disponibilité modifiée : ${invalid.map(x=>label(x.p)).join(', ')} n'est plus disponible pour le covoiturage. Actualise la proposition.`);
+  if(driver&&current.find(x=>x.p===driver)?.v?.noCar===true)throw new Error(`${label(driver)} n’a pas de voiture ce jour-là. Actualise la proposition.`);
   // Vérification des réponses aux impératifs, y compris si l'heure a été modifiée.
   const constraints=[];
   for(const {p:owner,v} of current){
@@ -924,11 +936,12 @@ async function validateSingleGroupForDate(ds,g,planGroups=[]){
   if(!validationGate.allowed)throw new Error(validationGate.message);
   const members=canonical(g?.members||g?.participants||[]),driver=g?.driver||g?.driverId;
   if(members.length<2||!members.includes(driver))throw new Error('Ce groupe est invalide.');
+  if(!hasCar(ds,driver))throw new Error(`${label(driver)} n’a pas de voiture ce jour-là : choisis un autre conducteur.`);
   if(!isPastDate(ds)){
     if(explicitIncompatibilities(ds,members).length)throw new Error('Ce groupe contient une incompatibilité horaire.');
     if(unknownCompatibilities(ds,members).length)throw new Error('Une ou plusieurs réponses aux impératifs sont encore attendues pour ce groupe.');
   }
-  await assertLiveGroupStatus(ds,members);
+  await assertLiveGroupStatus(ds,members,driver);
   const normalizedPlan=(planGroups.length?planGroups:displayedPlan(ds)).map(x=>({id:x.id||crypto.randomUUID(),members:canonical(x.members||x.participants||[]),driver:x.driver||x.driverId}));
   const normalizedGroup={id:g.id||crypto.randomUUID(),members,driver,source:IS_TEST?'test':'app'};
   const tripRef=doc(db,'tripDays',ds),planRef=doc(db,'plans',ds);let merged=[];
@@ -1327,7 +1340,7 @@ function pendingConfirmedGroups(date,availablePeople){
   const accepted=acceptedImperativePairs(date,availablePeople);
   let bestGroups=[],bestMissed=Infinity,bestAssigned=-1,bestImperatives=-1,bestGroupCount=Infinity,bestKey='';
   for(const part of partitionPeople(availablePeople)){
-    const groups=part.filter(g=>fullyConfirmedPendingGroup(date,g));
+    const groups=part.filter(g=>fullyConfirmedPendingGroup(date,g)&&g.some(p=>getAvail(date,p)?.noCar!==true));
     const missed=unsatisfiedAcceptedPairs(groups,accepted);
     const assigned=canonical(groups.flat());
     const imperativeCount=assigned.filter(p=>getAvail(date,p)?.status==='time').length;
@@ -1340,7 +1353,7 @@ function pendingConfirmedGroups(date,availablePeople){
     if(better){bestGroups=groups.map(g=>canonical(g));bestMissed=missed;bestAssigned=assigned.length;bestImperatives=imperativeCount;bestGroupCount=groups.length;bestKey=key;}
   }
   const assigned=new Set(bestGroups.flat());
-  const groups=bestGroups.map(g=>{const sug=driverSuggestion(date,g);return{id:`auto-${groupCode(g)}`,members:g,driver:sug.candidates[0]||g[0]};});
+  const groups=bestGroups.map(g=>{const sug=driverSuggestion(date,g,g.filter(p=>getAvail(date,p)?.noCar!==true));return{id:`auto-${groupCode(g)}`,members:g,driver:sug.candidates[0]||g[0]};});
   return {groups,singles:availablePeople.filter(p=>!assigned.has(p))};
 }
 // PENDING_GROUPS_LOGIC_END
@@ -1377,18 +1390,20 @@ function autoSuggestedGroups(date){
   const accepted=acceptedImperativePairs(date,availablePeople);
   let best=null,bestMissed=Infinity,bestScore=Infinity;
   for(const part of partitionPeople(order)){
-    let invalid=false; for(const g of part){for(let i=0;i<g.length;i++)for(let j=i+1;j<g.length;j++){if(pairExplicitlyIncompatible(date,g[i],g[j]))invalid=true;}}
+    let invalid=false; for(const g of part){if(g.length>=2&&g.every(p=>getAvail(date,p)?.noCar===true))invalid=true;for(let i=0;i<g.length;i++)for(let j=i+1;j<g.length;j++){if(pairExplicitlyIncompatible(date,g[i],g[j]))invalid=true;}}
     if(invalid)continue;
     // Priorite absolue aux "oui" vers un imperatif : on accepte un conducteur seul
     // plutot que de separer deux personnes qui ont convenu de partir ensemble.
     const missed=unsatisfiedAcceptedPairs(part,accepted);
-    const singles=part.filter(g=>g.length===1).length,score=singles*100+part.length*10;
+    // Une personne sans voiture laissée seule ne peut pas venir : à éviter en priorité.
+    const carlessAlone=part.filter(g=>g.length===1&&getAvail(date,g[0])?.noCar===true).length;
+    const singles=part.filter(g=>g.length===1).length,score=carlessAlone*1000+singles*100+part.length*10;
     if(missed<bestMissed||(missed===bestMissed&&score<bestScore)){bestMissed=missed;bestScore=score;best=part;}
   }
-  const part=best||order.map(p=>[p]); const singles=part.filter(g=>g.length===1).flat(); const groups=part.filter(g=>g.length>=2).map(g=>{const sug=driverSuggestion(date,g);return{id:`auto-${groupCode(g)}`,members:canonical(g),driver:sug.candidates[0]||canonical(g)[0]};}); return {groups,singles,pending:false,unknown:[],rejected:state.rejected};
+  const part=best||order.map(p=>[p]); const singles=part.filter(g=>g.length===1).flat(); const groups=part.filter(g=>g.length>=2).map(g=>{const sug=driverSuggestion(date,g,g.filter(p=>getAvail(date,p)?.noCar!==true));return{id:`auto-${groupCode(g)}`,members:canonical(g),driver:sug.candidates[0]||canonical(g)[0]};}); return {groups,singles,pending:false,unknown:[],rejected:state.rejected};
 }
 function proposalForDate(date){
-  const saved=currentPlan(date);
+  const saved=withCarDrivers(date,currentPlan(date));
   if(saved.length){
     if(savedPlanNeedsAvailabilityRefresh(date,saved))return updatedProposalFromSaved(date,saved);
     const members=canonical(saved.flatMap(g=>g.members));
@@ -1400,6 +1415,17 @@ function proposalForDate(date){
       unknown:allState.unknown,rejected:allState.rejected,groupRejected:groupState.rejected};
   }
   const auto=autoSuggestedGroups(date);return{...auto,saved:false,groupRejected:[]};
+}
+// Un conducteur sans voiture ce jour-là est remplacé par la suggestion parmi ceux qui en ont une ;
+// la composition du groupe est conservée.
+function withCarDrivers(date,groups){
+  if(!groups.some(g=>getAvail(date,g.driver)?.noCar===true))return groups;
+  return groups.map(g=>{
+    if(getAvail(date,g.driver)?.noCar!==true)return g;
+    const members=g.members||[],withCar=members.filter(p=>getAvail(date,p)?.noCar!==true);
+    if(!withCar.length)return g;
+    return {...g,driver:driverSuggestion(date,members,withCar).candidates[0]||withCar[0]};
+  });
 }
 function normalizedGroupSignature(groups){return groups.map(g=>`${canonical(g.members||g.participants||[]).join('|')}>${g.driver||g.driverId||''}`).sort().join('||');}
 function validatedSummaryHTML(ds){
@@ -1514,16 +1540,19 @@ function renderDellePrivate(ds){
   if(state.kind!=='same'){host.innerHTML=shell(`<div class="small muted">En attente de la répartition principale.</div>`);bindDelleHistoryActions();return;}
 
   const rotation=delleRotation(ds),existing=delleTrips.get(ds),mainDriver=state.mainDriver,forced=DELLE_PAIR.includes(mainDriver)?mainDriver:null;
-  const selected=forced||existing?.driver||rotation.suggested,ready=state.mainValidated;
-  const mismatch=existing&&forced&&existing.driver!==forced;
+  const delleCar=p=>hasCar(ds,p),carOwners=DELLE_PAIR.filter(delleCar);
+  const suggestedDriver=forced||(delleCar(rotation.suggested)?rotation.suggested:(carOwners[0]||rotation.suggested));
+  const selected=forced||(existing&&delleCar(existing.driver)?existing.driver:null)||suggestedDriver,ready=state.mainValidated&&carOwners.length>0;
+  const mismatch=existing&&((forced&&existing.driver!==forced)||!delleCar(existing.driver));
   const validated=existing&&!mismatch;
   host.innerHTML=`<div class="proposal-shell delle-proposal-shell">
     ${dellePrivateHeader()}
     <div class="proposal-group-simple">
-      <div class="proposal-main-line"><strong>Igor · Ludo</strong><span class="proposal-suggested">Suggéré : ${label(forced||rotation.suggested)}</span></div>
+      <div class="proposal-main-line"><strong>Igor · Ludo</strong><span class="proposal-suggested">Suggéré : ${label(suggestedDriver)}</span></div>
       <div class="proposal-counter-line">Compteurs : Igor ${rotation.counts.igor} · Ludo ${rotation.counts.ludo}</div>
-      <div class="proposal-driver-row"><label>Conducteur réel</label><select id="delleDriver" class="input" ${(forced||!ready||validated)?'disabled':''}><option value="igor" ${selected==='igor'?'selected':''}>Igor</option><option value="ludo" ${selected==='ludo'?'selected':''}>Ludo</option></select></div>
+      <div class="proposal-driver-row"><label>Conducteur réel</label><select id="delleDriver" class="input" ${(forced||!ready||validated)?'disabled':''}>${DELLE_PAIR.map(p=>`<option value="${p}" ${selected===p?'selected':''} ${delleCar(p)?'':'disabled'}>${label(p)}${delleCar(p)?'':' · sans voiture'}</option>`).join('')}</select></div>
     </div>
+    ${carOwners.length?'':'<div class="group-warning">Ni Igor ni Ludo n’a de voiture : pas de trajet jusqu’à Delle.</div>'}
     ${mismatch?'<div class="group-warning">Le conducteur doit être remis à jour.</div>':''}
     ${validated?`<div class="validated-summary"><div class="validated-title">✓ Trajet validé</div><div class="validated-line"><span>🚗 <strong>${label(existing.driver)}</strong></span></div></div>`:''}
     <div class="quick-actions"><button id="saveDelleTrip" class="btn" type="button" ${(!ready||validated)?'disabled':''}>${validated?'✓ Trajet validé':existing?'↻ Mettre à jour':'✓ Valider le trajet'}</button><button id="openDelleHistory" class="btn secondary" type="button">Historique</button></div>
@@ -1538,6 +1567,7 @@ function renderDellePrivate(ds){
 async function writeDelleTrip(ds,driver,state,source){
   const mainDriver=state.mainDriver,forced=DELLE_PAIR.includes(mainDriver)?mainDriver:null;
   if(!DELLE_PAIR.includes(driver))throw new Error('Conducteur Delle invalide.');
+  if(!hasCar(ds,driver))throw new Error(`${label(driver)} n’a pas de voiture ce jour-là : il ne peut pas conduire jusqu’à Delle.`);
   if(forced&&driver!==forced)throw new Error(`${label(forced)} doit conduire jusqu’à Delle car il conduit le groupe principal.`);
   const existing=delleTrips.get(ds),g=state.group;
   await setDoc(doc(db,'delleTrips',ds),{date:ds,destination:'Delle',members:DELLE_PAIR,driver,mainGroupId:g?.id||null,mainGroupMembers:canonical(g?.members||g?.participants||[]),mainDriver,privatePair:'igor_ludo',source,validatedAt:existing?.validatedAt||serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:profileId},{merge:true});
@@ -1582,15 +1612,16 @@ function renderQuickProposal(ds){
   const sameAsValidated=validated.length>0 && normalizedGroupSignature(gs)===normalizedGroupSignature(validated);
   const validationGate=tripValidationAvailability(ds);
   const groupHasRefusal=!!proposal.groupRejected?.length;
-  const blockValidation=proposal.pending||groupHasRefusal;
+  const blockValidation=proposal.pending||groupHasRefusal||gs.some(g=>!hasCar(ds,g.driver));
   const groupsHtml=gs.length?gs.map((g,i)=>{
-    const sug=driverSuggestion(ds,g.members),suggested=sug.candidates.length>1?`Égalité : ${sug.candidates.map(label).join(' / ')}`:`Suggéré : ${label(sug.candidates[0])}`,vg=validatedGroupForPlan(ds,g),done=isPlannedGroupValidated(ds,g),action=done?'✓ Groupe validé':vg?'↻ Mettre à jour':'✓ Valider ce groupe';
-    const thisGroupBlocked=unknownCompatibilities(ds,g.members).length>0||explicitIncompatibilities(ds,g.members).length>0;
+    const sug=driverSuggestion(ds,g.members,g.members.filter(p=>hasCar(ds,p))),suggested=sug.candidates.length>1?`Égalité : ${sug.candidates.map(label).join(' / ')}`:`Suggéré : ${label(sug.candidates[0])}`,vg=validatedGroupForPlan(ds,g),done=isPlannedGroupValidated(ds,g),action=done?'✓ Groupe validé':vg?'↻ Mettre à jour':'✓ Valider ce groupe';
+    const thisGroupBlocked=unknownCompatibilities(ds,g.members).length>0||explicitIncompatibilities(ds,g.members).length>0||!hasCar(ds,g.driver);
     return `<div class="proposal-group-simple ${i?'with-separator':''}">
       <div class="proposal-main-line"><strong>${gs.length>1?`Groupe ${i+1} · `:''}${g.members.map(label).join(' · ')}</strong><span class="proposal-suggested">${suggested}</span></div>
       <div class="proposal-counter-line">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div>
       <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}" ${(proposal.pending&&!proposal.saved)||driverSelectLocked(ds,g)?'disabled':''}>${driverOptionsHtml(ds,g)}</select></div>
       ${driverChoiceOpen(ds)?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}
+      ${g.members.some(p=>hasCar(ds,p))?'':'<div class="group-warning">⚠️ Personne dans ce groupe n’a de voiture.</div>'}
       ${gs.length>1?`<div class="quick-group-actions"><button class="btn smallbtn quick-validate-one" data-id="${g.id}" ${(done||thisGroupBlocked||!validationGate.allowed)?'disabled':''}>${action}</button><button class="btn secondary smallbtn quick-modify-one" data-id="${g.id}" type="button">Modifier ce groupe</button></div>`:''}
     </div>`;
   }).join(''):'<div class="empty compact-empty">Aucun groupe confirmé pour l’instant.</div>';
@@ -1615,12 +1646,13 @@ async function validateGroupsForDate(ds,groups){
   if(!validationGate.allowed)throw new Error(validationGate.message);
   if(!groups.length)return;const overlap=groupsHaveOverlap(groups);if(overlap){alert(`${label(overlap)} apparaît dans plusieurs groupes.`);return;}for(const g of groups){
     if(g.members.length<2||!g.members.includes(g.driver)){alert('Un groupe est invalide.');return;}
+    if(!hasCar(ds,g.driver)){alert(`${label(g.driver)} n’a pas de voiture ce jour-là : choisis un autre conducteur.`);return;}
     if(!isPastDate(ds)){
       if(explicitIncompatibilities(ds,g.members).length){alert('Un groupe contient une incompatibilité horaire.');return;}
       if(unknownCompatibilities(ds,g.members).length){alert('Une ou plusieurs réponses aux impératifs sont encore attendues pour ce groupe.');return;}
     }
   }
-  for(const g of groups)await assertLiveGroupStatus(ds,g.members);
+  for(const g of groups)await assertLiveGroupStatus(ds,g.members,g.driver);
   const existing=tripDays.get(ds),same=existing?.groups?.length&&normalizedGroupSignature(existing.groups)===normalizedGroupSignature(groups);if(existing?.groups?.length&&!same&&!confirm(`Des trajets sont déjà validés pour ${fmtDate(ds)}. Les remplacer ?`))return;
   const normalized=groups.map(g=>({id:g.id||crypto.randomUUID(),members:canonical(g.members),driver:g.driver,source:IS_TEST?'test':'app'})); const previousTrip=tripDays.get(ds),previousPlan=plans.get(ds);
   tripDays.set(ds,{date:ds,groups:normalized,source:IS_TEST?'test':'app',updatedBy:profileId}); plans.set(ds,{date:ds,groups:normalized,updatedBy:profileId}); if(activePage('tomorrow'))renderTomorrow(); if(activePage('groups')){renderGroups();renderValidatedInfo(ds);} if(activePage('history')){renderSummary();renderHistory();}
