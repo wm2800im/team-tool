@@ -243,6 +243,27 @@ function tripValidationAvailability(ds){
   const allowed=tripValidationRule(ds,appTodayISO(),now.hour,IS_TEST);
   return {allowed,message:allowed?'':`Validation possible à partir de ${fmtDate(ds)} à 7h.`};
 }
+// Avant l'heure de validation, chacun peut seulement se désigner lui-même
+// conducteur : personne ne peut imposer le volant à un autre membre.
+function driverChangeRule(group,newDriver,actor,validationOpen){
+  const members=group?.members||group?.participants||[];
+  if(!members.includes(newDriver))return false;
+  if(newDriver===(group?.driver||group?.driverId))return true;
+  if(validationOpen)return true;
+  return newDriver===actor;
+}
+function canChangeDriver(ds,group,newDriver){
+  return driverChangeRule(group,newDriver,profileId,tripValidationAvailability(ds).allowed);
+}
+function driverLockMessage(ds){
+  return `Jusqu’à ${fmtDate(ds)} 7h, chacun peut seulement se proposer lui-même comme conducteur.`;
+}
+function driverOptionsHtml(ds,g){
+  return canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''} ${canChangeDriver(ds,g,p)?'':'disabled'}>${label(p)}</option>`).join('');
+}
+function driverSelectLocked(ds,g){
+  return !canonical(g.members).some(p=>p!==g.driver&&canChangeDriver(ds,g,p));
+}
 const fmtDate = (s, opts={weekday:'long',day:'numeric',month:'long'}) => fromISO(s).toLocaleDateString('fr-FR',opts);
 const nowYear = () => appTodayISO().slice(0,4);
 const currentYM = () => appTodayISO().slice(0,7);
@@ -853,12 +874,12 @@ function renderDraftGroups(ds){
     div.innerHTML=`<div class="row" style="justify-content:space-between"><strong>Groupe ${idx+1} · ${sug.key}</strong><button class="btn danger smallbtn del-group" data-id="${g.id}">Supprimer</button></div>
       <div class="group-members">${canonical(g.members).map(p=>`<span class="member-chip">${label(p)}</span>`).join('')}</div>
       <div class="suggestion ${equal?'tie':''}">${equal?`⚖️ Égalité : ${sug.candidates.map(label).join(' / ')}`:`🚗 Conducteur conseillé : ${label(sug.candidates[0])}`}<div class="small">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div></div>
-      <div class="field"><label>Conducteur réel / prévu</label><select class="driver-select input" data-id="${g.id}">${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>
+      <div class="field"><label>Conducteur réel / prévu</label><select class="driver-select input" data-id="${g.id}" ${driverSelectLocked(ds,g)?'disabled':''}>${driverOptionsHtml(ds,g)}</select>${validationGate.allowed?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}</div>
       ${multi?`<div class="row" style="margin-top:8px"><button class="btn smallbtn validate-one-group" data-id="${g.id}" ${(done||!validationGate.allowed)?'disabled':''}>${action}</button></div>`:''}`;
     box.appendChild(div);
   });
   box.querySelectorAll('.del-group').forEach(b=>b.addEventListener('click',async()=>{if(editingGroupDate===ds&&editingGroupId===b.dataset.id){editingGroupId=null;editingGroupDate=null;}await savePlan(ds,displayedPlan(ds).filter(g=>g.id!==b.dataset.id));toast('Groupe supprimé.');}));
-  box.querySelectorAll('.driver-select').forEach(s=>s.addEventListener('change',async()=>{const gs=displayedPlan(ds).map(g=>g.id===s.dataset.id?{...g,driver:s.value}:g);await savePlan(ds,gs);toast('Conducteur modifié.');}));
+  box.querySelectorAll('.driver-select').forEach(s=>s.addEventListener('change',async()=>{const target=displayedPlan(ds).find(g=>g.id===s.dataset.id);if(!target||!canChangeDriver(ds,target,s.value)){alert(driverLockMessage(ds));renderGroups();return;}const gs=displayedPlan(ds).map(g=>g.id===s.dataset.id?{...g,driver:s.value}:g);try{await savePlan(ds,gs);toast('Conducteur modifié.');}catch(e){alert(friendlyError(e));}}));
   box.querySelectorAll('.validate-one-group').forEach(b=>b.addEventListener('click',async()=>{const planned=displayedPlan(ds),g=planned.find(x=>x.id===b.dataset.id);if(!g)return;b.disabled=true;b.textContent='Enregistrement…';try{await validateSingleGroupForDate(ds,g,planned);}catch(e){alert(friendlyError(e));renderGroups();}}));
 }
 function groupsHaveOverlap(groups){
@@ -1563,7 +1584,8 @@ function renderQuickProposal(ds){
     return `<div class="proposal-group-simple ${i?'with-separator':''}">
       <div class="proposal-main-line"><strong>${gs.length>1?`Groupe ${i+1} · `:''}${g.members.map(label).join(' · ')}</strong><span class="proposal-suggested">${suggested}</span></div>
       <div class="proposal-counter-line">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div>
-      <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}" ${proposal.pending&&!proposal.saved?'disabled':''}>${canonical(g.members).map(p=>`<option value="${p}" ${g.driver===p?'selected':''}>${label(p)}</option>`).join('')}</select></div>
+      <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}" ${(proposal.pending&&!proposal.saved)||driverSelectLocked(ds,g)?'disabled':''}>${driverOptionsHtml(ds,g)}</select></div>
+      ${validationGate.allowed?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}
       ${gs.length>1?`<div class="quick-group-actions"><button class="btn smallbtn quick-validate-one" data-id="${g.id}" ${(done||thisGroupBlocked||!validationGate.allowed)?'disabled':''}>${action}</button><button class="btn secondary smallbtn quick-modify-one" data-id="${g.id}" type="button">Modifier ce groupe</button></div>`:''}
     </div>`;
   }).join(''):'<div class="empty compact-empty">Aucun groupe confirmé pour l’instant.</div>';
@@ -1572,7 +1594,7 @@ function renderQuickProposal(ds){
   const singlesLabel=proposal.pending?'Non placés pour l’instant':'Sans groupe';
   box.innerHTML=`<div class="proposal-shell ${sameAsValidated?'is-validated':''}"><div class="proposal-head"><h3>${proposalTitle}</h3>${proposal.saved?'<span class="small muted">modifié manuellement</span>':''}</div>${groupsHtml}${pendingHtml}${proposal.singles.length?`<div class="group-warning">${singlesLabel} : ${proposal.singles.map(label).join(', ')}</div>`:''}${validatedSummaryHTML(ds)}<div class="quick-actions"><button id="quickValidate" class="btn" ${(sameAsValidated||blockValidation||!validationGate.allowed)?'disabled':''}>${groupHasRefusal?'Impératif incompatible':proposal.pending?'En attente des réponses':sameAsValidated?'✓ Trajet validé':validated.length?'↻ Mettre à jour le trajet':`✓ Valider le${gs.length>1?'s':''} trajet${gs.length>1?'s':''}`}</button><button id="quickModify" class="btn secondary">Modifier</button></div>${!validationGate.allowed?`<div class="small muted">${validationGate.message}</div>`:''}${IS_TEST&&validated.length?'<button id="quickResetTest" class="test-reset-link" type="button">↺ Réinitialiser ce trajet TEST</button>':''}<div id="quickSaveState" class="small muted quick-save-state"></div></div>`;
   box.querySelectorAll('.quick-driver').forEach(sel=>sel.addEventListener('change',()=>{
-    const current=proposalForDate(ds).groups.map(g=>({...g})); const target=current.find(g=>g.id===sel.dataset.id)||current.find(g=>groupCode(g.members)===sel.dataset.id.replace('auto-','')); if(!target)return; target.driver=sel.value;
+    const current=proposalForDate(ds).groups.map(g=>({...g})); const target=current.find(g=>g.id===sel.dataset.id)||current.find(g=>groupCode(g.members)===sel.dataset.id.replace('auto-','')); if(!target)return; if(!canChangeDriver(ds,target,sel.value)){alert(driverLockMessage(ds));renderTomorrow();return;} target.driver=sel.value;
     const savePromise=savePlan(ds,current); const state=$('quickSaveState'); if(state)state.textContent='Enregistrement du conducteur…';
     savePromise.then(()=>{const st=$('quickSaveState');if(st)st.textContent='✓ Conducteur enregistré';}).catch(e=>alert(friendlyError(e)));
   }));
