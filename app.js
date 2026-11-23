@@ -252,8 +252,13 @@ function driverChangeRule(group,newDriver,actor,validationOpen){
   if(validationOpen)return true;
   return newDriver===actor;
 }
+// L'heure réelle s'applique aussi en TEST pour pouvoir éprouver la règle.
+function driverChoiceOpen(ds){
+  const now=appNowParts();
+  return tripValidationRule(ds,appTodayISO(),now.hour,false);
+}
 function canChangeDriver(ds,group,newDriver){
-  return driverChangeRule(group,newDriver,profileId,tripValidationAvailability(ds).allowed);
+  return driverChangeRule(group,newDriver,profileId,driverChoiceOpen(ds));
 }
 function driverLockMessage(ds){
   return `Jusqu’à ${fmtDate(ds)} 7h, chacun peut seulement se proposer lui-même comme conducteur.`;
@@ -874,7 +879,7 @@ function renderDraftGroups(ds){
     div.innerHTML=`<div class="row" style="justify-content:space-between"><strong>Groupe ${idx+1} · ${sug.key}</strong><button class="btn danger smallbtn del-group" data-id="${g.id}">Supprimer</button></div>
       <div class="group-members">${canonical(g.members).map(p=>`<span class="member-chip">${label(p)}</span>`).join('')}</div>
       <div class="suggestion ${equal?'tie':''}">${equal?`⚖️ Égalité : ${sug.candidates.map(label).join(' / ')}`:`🚗 Conducteur conseillé : ${label(sug.candidates[0])}`}<div class="small">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div></div>
-      <div class="field"><label>Conducteur réel / prévu</label><select class="driver-select input" data-id="${g.id}" ${driverSelectLocked(ds,g)?'disabled':''}>${driverOptionsHtml(ds,g)}</select>${validationGate.allowed?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}</div>
+      <div class="field"><label>Conducteur réel / prévu</label><select class="driver-select input" data-id="${g.id}" ${driverSelectLocked(ds,g)?'disabled':''}>${driverOptionsHtml(ds,g)}</select>${driverChoiceOpen(ds)?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}</div>
       ${multi?`<div class="row" style="margin-top:8px"><button class="btn smallbtn validate-one-group" data-id="${g.id}" ${(done||!validationGate.allowed)?'disabled':''}>${action}</button></div>`:''}`;
     box.appendChild(div);
   });
@@ -1585,7 +1590,7 @@ function renderQuickProposal(ds){
       <div class="proposal-main-line"><strong>${gs.length>1?`Groupe ${i+1} · `:''}${g.members.map(label).join(' · ')}</strong><span class="proposal-suggested">${suggested}</span></div>
       <div class="proposal-counter-line">Compteurs : ${canonical(g.members).map(p=>`${label(p)} ${sug.counts[p]}`).join(' · ')}</div>
       <div class="proposal-driver-row"><label>Conducteur réel</label><select class="quick-driver input" data-id="${g.id}" ${(proposal.pending&&!proposal.saved)||driverSelectLocked(ds,g)?'disabled':''}>${driverOptionsHtml(ds,g)}</select></div>
-      ${validationGate.allowed?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}
+      ${driverChoiceOpen(ds)?'':`<div class="small muted">${driverLockMessage(ds)}</div>`}
       ${gs.length>1?`<div class="quick-group-actions"><button class="btn smallbtn quick-validate-one" data-id="${g.id}" ${(done||thisGroupBlocked||!validationGate.allowed)?'disabled':''}>${action}</button><button class="btn secondary smallbtn quick-modify-one" data-id="${g.id}" type="button">Modifier ce groupe</button></div>`:''}
     </div>`;
   }).join(''):'<div class="empty compact-empty">Aucun groupe confirmé pour l’instant.</div>';
