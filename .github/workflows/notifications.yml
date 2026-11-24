@@ -1,24 +1,33 @@
 name: Notifications Covoiturage
 
+# GitHub retarde ou saute souvent les planifications très fréquentes (« toutes
+# les 5 minutes ») : on vise donc des horaires précis, hors début d'heure.
+# Heures en UTC. 18h–21h UTC couvre 20h00–22h59 à Paris en hiver comme en été ;
+# le script ignore lui-même les passages hors fenêtre.
 on:
   schedule:
-    - cron: '*/5 * * * *'
-      timezone: 'Europe/Paris'
+    - cron: '7,22,37,52 18-21 * * *'   # rappels du soir (4 essais par heure)
+    - cron: '41 5-17 * * *'            # notifications de test demandées depuis l'appli
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: notifications
+  cancel-in-progress: false
+
 jobs:
   notifications:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Récupérer le dépôt
         uses: actions/checkout@v4
       - name: Installer Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: Installer les dépendances
         run: npm install --no-audit --no-fund
       - name: Envoyer les notifications

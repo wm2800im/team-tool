@@ -18,6 +18,8 @@ jobs:
           node --check app.js
           node --check public-config.js
           node --check service-worker.js
+          node --check notify-core.mjs
+          node --check notify-runner.mjs
       - name: Vérifier la configuration Firebase PROD
         run: |
           grep -q 'environment: "production"' public-config.js
